@@ -12,48 +12,9 @@ BodySlide and Outfit Studio, a tool to convert, create, and customize outfits an
 ## Build Instructions
 * [Building on Windows (Visual Studio or CMake)](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Building-on-Windows-%28Visual-Studio-or-CMake%29)
 * [Building on Linux](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Building-on-Linux)
-* [Building for macOS / CrossOver (Wine)](#building-for-macos--crossover-wine)
+* [Building for macOS / CrossOver (Wine)](CROSSOVER.md)
 * [Installation and Settings](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Installation-and-Settings)
 * [Installation on Linux](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Installation-on-Linux)
-
-## Building for macOS / CrossOver (Wine)
-
-When running Windows versions of BodySlide and Outfit Studio under CrossOver or Wine on Apple Silicon macOS, the OpenGL context creation requires specific flags to work with macOS's CGL driver:
-
-### Compatibility Fixes in this Fork
-1. **Forward-Compatible Core Profile**:
-   macOS CGL (Core OpenGL) strictly requires the `WGL_CONTEXT_FORWARD_COMPATIBLE_BIT_ARB` attribute flag for OpenGL 3.2+ Core Profile contexts. Without this flag, Wine's display driver (`winemac.so`) logs `OS X only supports forward-compatible 3.2+ contexts` and refuses to initialize the context, leaving the 3D viewport broken. This fork adds `.ForwardCompatible()` to `GLSurface::GetGLContextAttribs()`.
-2. **Fixed-Function Shader Cleanup**:
-   Legacy fixed-function OpenGL calls (`glShadeModel`) that are illegal in core profiles on macOS are guarded out.
-
-### Build Methods for macOS Users
-
-#### Option 1: Automated Build via GitHub Actions (Recommended)
-Because BodySlide relies on Windows MSVC-compiled dependencies (wxWidgets, Bullet3, OpenEXR via vcpkg), the cleanest way to produce Windows binaries on macOS is using GitHub Actions:
-1. Push this branch/tag to your GitHub fork.
-2. In your GitHub repository, navigate to the **Actions** tab.
-3. Run the **CMake RelWithDebInfo** workflow (`.github/workflows/cmake-release.yml`).
-4. Download the generated `windows-x64-relwithdebinfo.zip` artifact.
-5. Extract it directly into your Mod Organizer 2 mod folder (e.g. `CalienteTools/BodySlide/`).
-
-#### Option 2: Cross-Compiling with Windows SDK & vcpkg on macOS
-If cross-compiling locally on macOS using LLVM (`clang-cl` / `lld-link`):
-1. Provision Microsoft CRT and Windows SDK sysroot using `xwin`:
-   ```sh
-   xwin --accept-license 17 splat --output ~/.xwin
-   ```
-2. Configure CMake with the Windows target triplet:
-   ```sh
-   cmake -B build -S . \
-     -DCMAKE_SYSTEM_NAME=Windows \
-     -DCMAKE_C_COMPILER=clang-cl \
-     -DCMAKE_CXX_COMPILER=clang-cl \
-     -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
-     -DVCPKG_TARGET_TRIPLET=x64-windows-static \
-     -DBSOS_BUILD_TESTS=OFF \
-     -DBSOS_ENABLE_FBXSDK=OFF
-   cmake --build build --config Release --parallel
-   ```
 
 ## Credits / Libraries
 **Created by and/or with the help of:**
