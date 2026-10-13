@@ -10,11 +10,10 @@ See the included LICENSE file
 int RefTemplateCollection::Load(const std::string& basePath) {
 	refTemplates.clear();
 
-	wxArrayString files;
-	wxDir::GetAllFiles(basePath, &files, "*.xml");
+	std::vector<std::string> files = PlatformUtil::GetFilesRecursive(basePath, ".xml");
 
 	for (auto& file : files) {
-		RefTemplateFile templateFile(file.ToUTF8().data());
+		RefTemplateFile templateFile(file);
 		std::vector<std::string> templates;
 		templateFile.GetNames(templates);
 		for (auto& t : templates) {

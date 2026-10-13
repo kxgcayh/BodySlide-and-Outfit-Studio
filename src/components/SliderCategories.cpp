@@ -7,11 +7,10 @@ See the included LICENSE file
 #include "../utils/PlatformUtil.h"
 
 int SliderCategoryCollection::LoadCategories(const std::string& basePath) {
-	wxArrayString files;
-	wxDir::GetAllFiles(basePath, &files, "*.xml");
+	std::vector<std::string> files = PlatformUtil::GetFilesRecursive(basePath, ".xml");
 
 	for (auto& file : files) {
-		SliderCategoryFile catFile(file.ToUTF8().data());
+		SliderCategoryFile catFile(file);
 		std::vector<std::string> cats;
 		catFile.GetCategoryNames(cats);
 		for (auto& cat : cats) {

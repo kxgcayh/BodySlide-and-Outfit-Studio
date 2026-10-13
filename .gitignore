@@ -22,4 +22,7 @@
 *.vs
 
 /build
+/build*
+.DS_Store
+*.DS_Store
 !tests/data/**/*.dds

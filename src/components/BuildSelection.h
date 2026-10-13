@@ -10,7 +10,6 @@ See the included LICENSE file
 #include <map>
 #include <string>
 #include <utility>
-#include <wx/dir.h>
 
 using namespace tinyxml2;
 

@@ -1,4 +1,4 @@
-﻿/*
+/*
 BodySlide and Outfit Studio
 
 This program is free software: you can redistribute it and/or modify
@@ -16,6 +16,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "OutfitStudio.h"
+#include <wx/dir.h>
 #include "../components/SliderGroup.h"
 #include "../components/SliderPresets.h"
 #include "../files/HkxFile.h"
@@ -15187,6 +15188,7 @@ void wxGLPanel::OnShown() {
 	}
 
 	gls.Initialize(this, context.get());
+	gls.InitImGui();
 	auto size = GetSize();
 	gls.SetStartingView(Vector3(0.0f, -5.0f, -15.0f), Vector3(15.0f, 0.0f, 0.0f), size.GetWidth(), size.GetHeight());
 	gls.SetMaskVisible();

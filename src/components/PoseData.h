@@ -11,6 +11,7 @@ See the included LICENSE file
 #include "Object3d.hpp"
 
 class AnimBone;
+class wxString;
 
 #include <cstdint>
 #include <deque>
@@ -19,7 +20,6 @@ class AnimBone;
 #include <string>
 #include <unordered_set>
 #include <vector>
-#include <wx/dir.h>
 
 using namespace tinyxml2;
 

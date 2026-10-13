@@ -14,6 +14,9 @@ See the included LICENSE file
 #include <limits>
 #include <set>
 
+#include <imgui.h>
+#include <imgui_impl_opengl3.h>
+
 using namespace nifly;
 
 extern ConfigurationManager Config;
@@ -203,6 +206,8 @@ void GLSurface::Cleanup() {
 	hdri.Clear();
 
 	resLoader.Cleanup();
+
+	CleanupImGui();
 }
 
 void GLSurface::SetStartingView(const Vector3& pos, const Vector3& rot, const uint32_t& vpWidth, const uint32_t& vpHeight, const float& fov) {
@@ -899,6 +904,10 @@ void GLSurface::RenderOneFrame() {
 			RenderMesh(o);
 		}
 	}
+
+	// Render ImGui overlay if active
+	if (imguiInitialized)
+		RenderImGui();
 
 	canvas->SwapBuffers();
 	return;
@@ -2542,4 +2551,58 @@ GLMaterial* GLSurface::GetPrimitiveMaterial() {
 	}
 
 	return primitiveMat;
+}
+
+bool GLSurface::InitImGui() {
+	if (imguiInitialized)
+		return true;
+
+	if (!canvas || !context)
+		return false;
+
+	canvas->SetCurrent(*context);
+
+	IMGUI_CHECKVERSION();
+	ImGui::CreateContext();
+	ImGuiIO& io = ImGui::GetIO();
+	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+	ImGui::StyleColorsDark();
+
+	// Initialize OpenGL3 backend
+	if (!ImGui_ImplOpenGL3_Init("#version 330")) {
+		ImGui::DestroyContext();
+		return false;
+	}
+
+	imguiInitialized = true;
+	return true;
+}
+
+void GLSurface::RenderImGui() {
+	if (!imguiInitialized)
+		return;
+
+	ImGuiIO& io = ImGui::GetIO();
+	io.DisplaySize = ImVec2(static_cast<float>(vpW), static_cast<float>(vpH));
+	io.DeltaTime = 1.0f / 60.0f;
+
+	ImGui_ImplOpenGL3_NewFrame();
+	ImGui::NewFrame();
+
+	// Render ImGui overlay
+	ImGui::Render();
+	ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+}
+
+void GLSurface::CleanupImGui() {
+	if (!imguiInitialized)
+		return;
+
+	if (canvas && context)
+		canvas->SetCurrent(*context);
+
+	ImGui_ImplOpenGL3_Shutdown();
+	ImGui::DestroyContext();
+	imguiInitialized = false;
 }

@@ -304,6 +304,11 @@ set(BSOS_COMMON_SOURCES
 	lib/FSEngine/FSEngine.cpp
 	lib/FSEngine/FSManager.cpp
 	lib/gli/glm/detail/glm.cpp
+	lib/imgui/imgui.cpp
+	lib/imgui/imgui_draw.cpp
+	lib/imgui/imgui_tables.cpp
+	lib/imgui/imgui_widgets.cpp
+	lib/imgui/imgui_impl_opengl3.cpp
 	lib/LZ4F/lz4.c
 	lib/LZ4F/lz4file.c
 	lib/LZ4F/lz4frame.c
@@ -441,6 +446,7 @@ add_executable(BodySlide ${BSOS_BODYSLIDE_SOURCES})
 set(BSOS_COMMON_INCLUDE_DIRS
 	${CMAKE_CURRENT_SOURCE_DIR}/lib
 	${CMAKE_CURRENT_SOURCE_DIR}/lib/gli
+	${CMAKE_CURRENT_SOURCE_DIR}/lib/imgui
 	${CMAKE_CURRENT_SOURCE_DIR}/lib/fkYAML/include
 	${CMAKE_CURRENT_SOURCE_DIR}/lib/nlohmannjson/include
 	${CMAKE_CURRENT_SOURCE_DIR}/lib/nifly/include

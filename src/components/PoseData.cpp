@@ -8,7 +8,8 @@ See the included LICENSE file
 #include "../utils/PlatformUtil.h"
 #include "../utils/StringStuff.h"
 
-#include <wx/filename.h>
+#include <filesystem>
+#include <algorithm>
 
 bool PoseData::LoadElement(XMLElement* srcElement) {
 	if (srcElement == nullptr)
@@ -57,11 +58,10 @@ void PoseData::WriteElement(XMLElement* element, bool append) const {
 int PoseDataCollection::LoadData(const std::string& basePath) {
 	poseData.clear();
 
-	wxArrayString files;
-	wxDir::GetAllFiles(basePath, &files, "*.xml");
+	std::vector<std::string> files = PlatformUtil::GetFilesRecursive(basePath, ".xml");
 
 	for (auto& file : files) {
-		PoseDataFile poseDataFile(file.ToUTF8().data());
+		PoseDataFile poseDataFile(file);
 
 		std::vector<PoseData> poseDataEntries;
 		poseDataFile.GetData(poseDataEntries);
@@ -77,19 +77,17 @@ int PoseDataCollection::LoadGamePoses(const std::string& gameDataPath, bool fall
 	if (gameDataPath.empty())
 		return 0;
 
-	wxString poseDir = wxString::FromUTF8(gameDataPath);
-	if (!poseDir.EndsWith(PathSepChar))
-		poseDir.Append(PathSepChar);
-
+	std::filesystem::path poseDir(gameDataPath);
 	if (fallout4)
-		poseDir += wxString("F4SE") + PathSepChar + "Plugins" + PathSepChar + "SAF" + PathSepChar + "Poses";
+		poseDir = poseDir / "F4SE" / "Plugins" / "SAF" / "Poses";
 	else
-		poseDir += wxString("SAM") + PathSepChar + "Poses";
+		poseDir = poseDir / "SAM" / "Poses";
 
-	if (!wxDirExists(poseDir))
+	std::error_code ec;
+	if (!std::filesystem::exists(poseDir, ec) || !std::filesystem::is_directory(poseDir, ec))
 		return 0;
 
-	std::string utf8Dir(poseDir.ToUTF8().data());
+	std::string utf8Dir = poseDir.u8string();
 	if (fallout4)
 		return LoadJsonData(utf8Dir, "SAM: ");
 
@@ -107,34 +105,34 @@ AnimationData* PoseDataCollection::AddAnimation(AnimationData anim) {
 }
 
 PoseFileFormat PoseDataCollection::GetPoseFileFormat(const std::string& filePath) {
-	wxFileName fn(wxString::FromUTF8(filePath.c_str()));
-	wxString ext = fn.GetExt().Lower();
-	if (ext == "hkx")
+	std::filesystem::path p(filePath);
+	std::string ext = p.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+	if (ext == ".hkx")
 		return PoseFileFormat::Hkx;
-	if (ext == "json")
+	if (ext == ".json")
 		return PoseFileFormat::Json;
-	if (ext == "yaml" || ext == "yml")
+	if (ext == ".yaml" || ext == ".yml")
 		return PoseFileFormat::Yaml;
 	return PoseFileFormat::Unknown;
 }
 
 std::string PoseDataCollection::SanitizeFileStem(const std::string& name) {
-	wxString wxName = wxString::FromUTF8(name.c_str());
-	wxName.Trim(true).Trim(false);
-	if (wxName.empty() || wxName == "<New>")
-		wxName = "pose";
+	std::string cleanName = TrimString(name);
+	if (cleanName.empty() || cleanName == "<New>")
+		cleanName = "pose";
 
-	static const char* invalidChars = "<>:\"/\\|?*";
-	for (const char* ch = invalidChars; *ch; ++ch)
-		wxName.Replace(wxString::Format("%c", *ch), "_");
+	static const std::string invalidChars = "<>:\"/\\|?*";
+	for (char ch : invalidChars)
+		std::replace(cleanName.begin(), cleanName.end(), ch, '_');
 
-	while (!wxName.empty() && (wxName.Last() == '.' || wxName.Last() == ' '))
-		wxName.RemoveLast();
+	while (!cleanName.empty() && (cleanName.back() == '.' || cleanName.back() == ' '))
+		cleanName.pop_back();
 
-	if (wxName.empty())
-		wxName = "pose";
+	if (cleanName.empty())
+		cleanName = "pose";
 
-	return std::string(wxName.ToUTF8().data());
+	return cleanName;
 }
 
 void PoseDataCollection::CaptureCurrentPose(const std::string& poseName, bool absoluteLocal, PoseData& outPose) {

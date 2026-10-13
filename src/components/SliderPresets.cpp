@@ -9,8 +9,6 @@ See the included LICENSE file
 
 #include <tinyxml2.h>
 
-#include <wx/dir.h>
-
 using namespace tinyxml2;
 
 void PresetCollection::Clear() {
@@ -125,12 +123,10 @@ void PresetCollection::GetPresetGroups(const std::string& set, std::vector<std::
 }
 
 bool PresetCollection::LoadPresets(const std::string& basePath, const std::string& sliderSet, std::vector<std::string>& groupFilter, bool allPresets) {
-	wxArrayString files;
-	wxString path = wxString::FromUTF8(basePath);
-	wxDir::GetAllFiles(path, &files, "*.xml");
+	std::vector<std::string> files = PlatformUtil::GetFilesRecursive(basePath, ".xml");
 
 	for (auto& file : files)
-		LoadPresetFile(file.ToUTF8().data(), sliderSet, groupFilter, allPresets);
+		LoadPresetFile(file, sliderSet, groupFilter, allPresets);
 
 	return 0;
 }

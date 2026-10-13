@@ -13,6 +13,7 @@ See the included LICENSE file
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace PlatformUtil {
 #ifdef _WINDOWS
@@ -25,6 +26,7 @@ std::wstring MultiByteToWideUTF8(const std::string& str);
 
 void OpenFileStream(std::fstream& file, const std::string& fileName, std::ios_base::openmode mode);
 bool FileExists(const std::string& fileName);
+std::vector<std::string> GetFilesRecursive(const std::string& basePath, const std::string& extensionFilter = "");
 
 // Provide std::wstring function for Windows
 #ifdef _WINDOWS

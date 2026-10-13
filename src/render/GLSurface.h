@@ -472,4 +472,13 @@ public:
 		for (auto& o : overlays)
 			UpdateShaders(o);
 	}
+
+	// Immediate-mode UI overlay (Dear ImGui)
+	bool InitImGui();
+	void RenderImGui();
+	void CleanupImGui();
+	bool IsImGuiActive() const { return imguiInitialized; }
+
+private:
+	bool imguiInitialized = false;
 };

@@ -5,6 +5,9 @@ See the included LICENSE file
 
 #include "PlatformUtil.h"
 
+#include <filesystem>
+#include <algorithm>
+
 namespace {
 std::string backslash_to_slash(const std::string& s) {
 	std::string sc(s);
@@ -59,6 +62,38 @@ bool FileExists(const std::string& fileName) {
 		return false;
 
 	return true;
+}
+
+std::vector<std::string> GetFilesRecursive(const std::string& basePath, const std::string& extensionFilter) {
+	std::vector<std::string> outFiles;
+	std::error_code ec;
+	std::filesystem::path root(basePath);
+
+	if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec))
+		return outFiles;
+
+	std::string filter = extensionFilter;
+	if (!filter.empty() && filter.front() == '*')
+		filter.erase(0, 1);
+	std::transform(filter.begin(), filter.end(), filter.begin(), ::tolower);
+
+	for (const auto& entry : std::filesystem::recursive_directory_iterator(root, std::filesystem::directory_options::skip_permission_denied, ec)) {
+		if (ec)
+			break;
+		if (!entry.is_regular_file(ec))
+			continue;
+
+		if (!filter.empty()) {
+			std::string ext = entry.path().extension().string();
+			std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+			if (ext != filter)
+				continue;
+		}
+
+		outFiles.push_back(entry.path().u8string());
+	}
+
+	return outFiles;
 }
 
 // Provide std::wstring function for Windows

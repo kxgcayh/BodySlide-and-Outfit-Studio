@@ -6,7 +6,7 @@ See the included LICENSE file
 #include "PoseData.h"
 #include "../utils/PlatformUtil.h"
 
-#include <wx/filename.h>
+#include <filesystem>
 
 #include <nlohmann/json.hpp>
 
@@ -236,21 +236,21 @@ bool PoseDataCollection::SaveJsonPose(const std::string& filePath, const PoseDat
 }
 
 int PoseDataCollection::LoadJsonData(const std::string& basePath, const std::string& namePrefix) {
-	wxString wxBase = wxString::FromUTF8(basePath.c_str());
-	if (!wxDirExists(wxBase))
+	std::error_code ec;
+	std::filesystem::path root(basePath);
+	if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec))
 		return 0;
 
-	wxArrayString files;
-	wxDir::GetAllFiles(wxBase, &files, "*.json", wxDIR_FILES);
+	std::vector<std::string> files = PlatformUtil::GetFilesRecursive(basePath, ".json");
 
 	int loaded = 0;
-	for (auto& file : files) {
+	for (const auto& file : files) {
 		PoseData pd;
 		pd.readOnly = true;
-		wxFileName fn(file);
-		pd.name = namePrefix + std::string(fn.GetName().ToUTF8().data());
+		std::filesystem::path p(file);
+		pd.name = namePrefix + p.stem().string();
 
-		if (LoadJsonPose(file.ToUTF8().data(), pd)) {
+		if (LoadJsonPose(file, pd)) {
 			AddPose(std::move(pd));
 			++loaded;
 		}

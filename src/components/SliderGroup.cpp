@@ -9,11 +9,10 @@ See the included LICENSE file
 int SliderSetGroupCollection::LoadGroups(const std::string& basePath) {
 	groups.clear();
 
-	wxArrayString files;
-	wxDir::GetAllFiles(basePath, &files, "*.xml");
+	std::vector<std::string> files = PlatformUtil::GetFilesRecursive(basePath, ".xml");
 
 	for (auto& file : files) {
-		SliderSetGroupFile groupFile(file.ToUTF8().data());
+		SliderSetGroupFile groupFile(file);
 		std::vector<std::string> groupNames;
 		groupFile.GetGroupNames(groupNames);
 		for (auto& group : groupNames) {
