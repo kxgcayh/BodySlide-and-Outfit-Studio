@@ -86,7 +86,8 @@ const wxGLContextAttrs& GLSurface::GetGLContextAttribs() {
 	static wxGLContextAttrs ctxAttribs;
 
 	if (!ctxAttribsInitialized) {
-		ctxAttribs.PlatformDefaults().CoreProfile().OGLVersion(3, 3).EndList();
+		// ForwardCompatible is strictly required on macOS / CrossOver (Wine) for OpenGL 3.2+ Core Profile
+		ctxAttribs.PlatformDefaults().CoreProfile().ForwardCompatible().OGLVersion(3, 3).EndList();
 		ctxAttribsInitialized = true;
 	}
 
@@ -133,7 +134,10 @@ void GLSurface::InitGLExtensions() {
 }
 
 int GLSurface::InitGLSettings() {
+#ifndef __APPLE__
+	// glShadeModel is legacy fixed-function and deprecated in core profiles
 	glShadeModel(GL_SMOOTH);
+#endif
 
 	glClearDepth(1.0f);
 	glEnable(GL_DEPTH_TEST);
