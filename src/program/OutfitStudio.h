@@ -30,7 +30,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../ui/wxStateButton.h"
 #include "../utils/ConfigurationManager.h"
 #include "../utils/Log.h"
+#include "../utils/MainThreadDispatcher.h"
+#include "../utils/TargetGame.h"
+#include "EditorState.h"
 #include "OutfitProject.h"
+#include "ProjectOperations.h"
 
 #include "FSEngine/FSEngine.h"
 #include "FSEngine/FSManager.h"
@@ -38,6 +42,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -70,8 +75,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <wx/msw/registry.h>
 #endif
 
-enum TargetGame { FO3, FONV, SKYRIM, FO4, SKYRIMSE, FO4VR, SKYRIMVR, FO76, OB, SF };
-
 #define ANIM_PLAYBACK_TIMER 300
 #define PHYSICS_TIMER 301
 
@@ -80,31 +83,29 @@ struct MergeCheckErrors;
 
 class ShapeItemData : public wxTreeItemData {
 	nifly::NiShape* shape = nullptr;
-	std::string refProjectFile;
-	std::string refProjectName;
-
 public:
 	ShapeItemData(nifly::NiShape* inShape) { shape = inShape; }
 
 	nifly::NiShape* GetShape() { return shape; }
 
 	void SetShape(nifly::NiShape* newShape) { shape = newShape; }
-
-	const std::string& GetRefProjectFile() const { return refProjectFile; }
-	const std::string& GetRefProjectName() const { return refProjectName; }
-
-	void SetRefSource(const std::string& projectFile, const std::string& projectName) {
-		refProjectFile = projectFile;
-		refProjectName = projectName;
-	}
 };
 
 struct ShapeItemState {
 	std::string shapeName;
 	int state = 0;
 	bool selected = false;
-	std::string refProjectFile;
-	std::string refProjectName;
+};
+
+// NIF and .osd file that saving writes, and the project that writes them
+struct SharedFilesTarget {
+	std::string dataDir; // Relative to the "ShapeData" folder
+	std::string nifName;
+	std::string osdName;
+	std::string setFile;
+	std::string setName;
+	bool addOn = false;
+	bool hasBase = false;
 };
 
 class SegmentItemData : public wxTreeItemData {
@@ -174,7 +175,9 @@ struct ConformOptions;
 struct ClippingFixOptions;
 class OutfitStudioFrame;
 class ArchiveBrowser;
+class BrushStrokeController;
 class EditUV;
+class OutfitStudioMcp;
 struct SymmetricVertices;
 struct VertexAsymmetries;
 struct VertexAsymmetryTasks;
@@ -225,7 +228,12 @@ public:
 	void SetActiveShapes(const std::vector<std::string>& shapeNames);
 	void SetSelectedShape(const std::string& shapeName);
 
-	UndoHistory* GetUndoHistory() { return &undoHistory; }
+	UndoHistory* GetUndoHistory();
+	// A brush stroke or a transform is in progress
+	bool IsStrokeActive() const;
+	// Renders the view offscreen at the given size and saves it as a PNG
+	bool SaveViewImage(const wxString& fileName, int width, int height);
+	bool RenderViewImage(int width, int height, wxImage& outImage);
 
 	void SetActiveTool(ToolID brushID);
 	ToolID GetActiveTool() { return activeTool; }
@@ -444,15 +452,15 @@ public:
 		gls.SetCursorSize(brushSize);
 	}
 
-	float IncBrush() {
-		gls.SetCursorSize(gls.GetCursorSize() + 0.010f);
-		brushSize += 0.010f;
+	float IncBrush(float step = 0.010f) {
+		gls.SetCursorSize(gls.GetCursorSize() + step);
+		brushSize += step;
 		LimitBrushSize();
 		return brushSize;
 	}
-	float DecBrush() {
-		gls.SetCursorSize(gls.GetCursorSize() - 0.010f);
-		brushSize -= 0.010f;
+	float DecBrush(float step = 0.010f) {
+		gls.SetCursorSize(gls.GetCursorSize() - step);
+		brushSize -= step;
 		LimitBrushSize();
 		return brushSize;
 	}
@@ -585,6 +593,9 @@ public:
 	std::unordered_map<std::string, std::vector<float>> StashMasks();
 	void UnstashMasks(const std::unordered_map<std::string, std::vector<float>>& stash);
 
+	// Applies the mask changes of each active mesh as one undo step
+	void ApplyMaskChanges(const std::function<std::unordered_map<int, float>(Mesh&)>& changesForMesh);
+	void ApplyMaskChanges(const std::vector<Mesh*>& meshes, const std::function<std::unordered_map<int, float>(Mesh&)>& changesForMesh);
 	void MaskLess();
 	void MaskMore();
 	void InvertMask();
@@ -872,7 +883,7 @@ private:
 	TB_XForm translateBrush;
 
 	std::unique_ptr<TweakStroke> activeStroke;
-	UndoHistory undoHistory;
+	std::unique_ptr<BrushStrokeController> brushStroke;
 
 	Mesh* RotationCenterMesh = nullptr;
 	Mesh* RotationCenterMeshRingX = nullptr;
@@ -933,6 +944,8 @@ private:
 static const wxCmdLineEntryDesc g_cmdLineDesc[] = {{wxCMD_LINE_OPTION, "proj", "project", "Project Name", wxCMD_LINE_VAL_STRING, wxCMD_LINE_PARAM_OPTIONAL},
 												   {wxCMD_LINE_OPTION, "single", "single-instance", "Force single instance behavior (yes/no)", wxCMD_LINE_VAL_STRING, wxCMD_LINE_PARAM_OPTIONAL},
 												   {wxCMD_LINE_OPTION, "a", "automation", "Run an automation script by name (no .xml extension); positional args are batch inputs", wxCMD_LINE_VAL_STRING, wxCMD_LINE_PARAM_OPTIONAL},
+												   {wxCMD_LINE_SWITCH, nullptr, "mcp", "Start the MCP server that lets AI agents control Outfit Studio", wxCMD_LINE_VAL_NONE, 0},
+												   {wxCMD_LINE_OPTION, nullptr, "mcp-port", "Port of the MCP server", wxCMD_LINE_VAL_NUMBER, wxCMD_LINE_PARAM_OPTIONAL},
 												   {wxCMD_LINE_PARAM, nullptr, nullptr, "Files", wxCMD_LINE_VAL_STRING, wxCMD_LINE_PARAM_OPTIONAL | wxCMD_LINE_PARAM_MULTIPLE},
 												   wxCMD_LINE_DESC_END};
 
@@ -941,6 +954,7 @@ public:
 	virtual ~OutfitStudio();
 
 	virtual bool OnInit();
+	virtual int OnRun() override;
 	virtual int OnExit() override;
 	virtual void OnInitCmdLine(wxCmdLineParser& parser);
 	virtual bool OnCmdLineParsed(wxCmdLineParser& parser);
@@ -969,6 +983,8 @@ private:
 	wxString cmdProject;
 	wxString cmdAutomation;
 	int cmdForceSingleInstanceBehavior = -1;  // -1 = not set, 0 = no (force new), 1 = yes (force existing)
+	bool cmdMcp = false;
+	long cmdMcpPort = -1;
 	int automationExitCode = 0;
 
 	int RunAutomationFromCmdLine();
@@ -1006,16 +1022,114 @@ public:
 	void Show(int toolId, bool show);
 };
 
+// Connects the project to the Outfit Studio window: progress bar, message boxes and GUI refreshes.
+class OutfitStudioProjectHost : public NonInteractiveHost {
+public:
+	explicit OutfitStudioProjectHost(OutfitStudioFrame* inFrame)
+		: frame(inFrame) {}
+
+	// While disabled, prompts are answered with their defaults like NonInteractiveHost does.
+	void SetInteractive(bool enable) { interactive = enable; }
+	bool IsInteractive() const override { return interactive; }
+
+	void StartProgress(const wxString& msg = "") override;
+	void StartSubProgress(int min, int max) override;
+	void UpdateProgress(int val, const wxString& msg = "") override;
+	void EndProgress(const wxString& msg = "", bool forceEmpty = false) override;
+
+	void ShowMessage(HostMessageLevel level, const wxString& msg, const wxString& title) override;
+	HostAnswer Ask(const wxString& msg, const wxString& title, bool withCancel, HostAnswer defaultAnswer) override;
+	bool ChooseMany(const wxString& msg, const wxString& title, const wxArrayString& choices, wxArrayInt& selections) override;
+	bool ChooseOne(const wxString& msg, const wxString& title, const wxArrayString& choices, int& selection) override;
+	bool GetText(const wxString& msg, const wxString& title, wxString& value) override;
+	wxWindow* GetDialogParent() override;
+
+	Mesh* GetShapeMesh(const std::string& shapeName) override;
+
+	void UpdateShapeMesh(const std::string& shapeName) override;
+	void OnAnimationChanged() override;
+	void OnPartitionsChanged() override;
+	void OnShapeDeleting(nifly::NiShape* shape) override;
+	void DeleteSlidersForMerge(bool keepSliders, bool keepZaps) override;
+
+private:
+	OutfitStudioFrame* frame = nullptr;
+	bool interactive = true;
+};
+
+// How a shape is shown in the view, the same as the states of the shape list items
+enum class ShapeDisplayMode { Visible = 0, Hidden = 1, Ghost = 2 };
+
+// Everything about how the view looks, to change it for a render and restore it afterwards
+struct ViewState {
+	GLSurface::CameraState camera;
+	GLSurface::DisplaySettings display;
+	std::map<std::string, ShapeDisplayMode> shapes;
+};
+
+// While it exists, the project host answers prompts with their defaults. Collects the messages
+// of that time, so a caller can report what happened during an operation.
+class UnattendedScope {
+public:
+	explicit UnattendedScope(OutfitStudioProjectHost& inHost)
+		: host(inHost)
+		, wasInteractive(inHost.IsInteractive())
+		, firstMessage(inHost.GetMessages().size()) {
+		host.SetInteractive(false);
+	}
+
+	~UnattendedScope() { host.SetInteractive(wasInteractive); }
+
+	std::vector<HostMessage> Messages() const {
+		const auto& all = host.GetMessages();
+		return std::vector<HostMessage>(all.begin() + std::min(firstMessage, all.size()), all.end());
+	}
+
+private:
+	OutfitStudioProjectHost& host;
+	bool wasInteractive = true;
+	size_t firstMessage = 0;
+};
+
 class OutfitStudioFrame : public wxFrame {
 public:
 	OutfitStudioFrame(const wxPoint& pos, const wxSize& size);
-	~OutfitStudioFrame() {}
+	~OutfitStudioFrame();
+
+	// Runs work on this window's thread for callers on other threads, like an external API
+	MainThreadDispatcher& GetDispatcher() { return *dispatcher; }
+
+	// Why the editor can't take an operation from outside right now, or empty if it can.
+	// Main thread only.
+	std::string GetBusyReason();
+
+	// Starts the MCP server that lets AI agents control this window, on the configured port
+	// for -1. Shows what went wrong if it can't start, in a message box when showError is set
+	// and otherwise only in the status bar and log. Main thread only.
+	bool StartMcpServer(int port = -1, bool showError = true);
+	void StopMcpServer();
+
+	bool HasPendingChanges() const { return pendingChanges; }
+
+	// Saves the current skeleton pose to the pose list and the PoseData folder, replacing a pose of the
+	// same name unless it's read-only. Returns the error, or an empty string.
+	std::string SaveCurrentPose(const std::string& poseName);
+	// Saves the current skeleton pose to a .hkx, .json, .yaml or .yml file. HKX needs the Havok skeleton
+	// next to the reference skeleton. Returns the error, or an empty string.
+	std::string SaveCurrentPoseFile(const std::string& fileName);
 
 	void LoadFiles(const wxArrayString& files, const wxString& projectName = "");
 
+	// Import a file after asking for the import options. Returns 1 if the dialog was cancelled.
+	int ImportOBJWithDialog(const std::string& fileName, const std::string& shapeName = "", nifly::NiShape* mergeShape = nullptr);
+#ifdef USE_FBXSDK
+	int ImportFBXWithDialog(const std::string& fileName, const std::string& shapeName = "", nifly::NiShape* mergeShape = nullptr);
+#endif
+
 	// Loads a mesh out of a BSA/BA2 archive as the outfit, or imports it into
 	// the project when "import" is set.
-	void LoadMeshFromArchive(const std::string& relPath, const std::string& archivePath, bool import);
+	// Returns whether the mesh was loaded
+	bool LoadMeshFromArchive(const std::string& relPath, const std::string& archivePath, bool import);
 
 	const std::vector<RefTemplate>& GetRefTemplates() const { return refTemplates; }
 
@@ -1063,19 +1177,18 @@ public:
 	wxGLPanel* glView = nullptr;
 	EditUV* editUV = nullptr;
 	ArchiveBrowser* archiveBrowser = nullptr;
+	OutfitStudioProjectHost projectHost{this};
+	std::unique_ptr<MainThreadDispatcher> dispatcher;
+	std::unique_ptr<OutfitStudioMcp> mcp;
 	OutfitProject* project = nullptr;
+	EditorState editor;
 	ShapeItemData* activeItem = nullptr;
-	std::string activeSlider;
-	std::string lastActiveSlider;
-	bool bEditSlider = false;
 	bool autoFrameSelected = false;
 	std::vector<int> triParts;	// the partition index for each triangle, or -1 for none
 	std::vector<int> triSParts; // the segment partition index for each triangle, or -1 for none
 
 	std::deque<ProjectHistoryEntry> projectHistory;
 
-	std::unordered_set<std::string> lastSelectedBones;
-	std::unordered_set<std::string> lastNormalizeBones;
 
 	PoseDataCollection poseDataCollection;
 	wxSliderPanelPool sliderPool;
@@ -1175,6 +1288,8 @@ public:
 
 	bool SaveProject();
 	bool SaveProjectAs();
+	// Files the Save Project As dialog would write, and the project that writes them
+	SharedFilesTarget SaveAsSharedFilesTarget(wxDialog& dlg, bool hasBase, bool addOn);
 	bool LoadProject(const std::string& fileName,
 					 const std::string& projectName = "",
 					 bool clearProject = true,
@@ -1185,6 +1300,10 @@ public:
 	// more than one. If preferredName is given and present in the file, it is used without
 	// prompting. Returns an empty string on failure (an error is shown) or if cancelled.
 	std::string ChooseSliderSetName(const std::string& fileName, const std::string& preferredName = "");
+	// The project file and set the New Project wizard has as the base project of an add-on or variant.
+	bool GetNewProjectBase(wxWizard& wiz, std::string& outFile, std::string& outSet);
+	// Asks before renaming a slider or shape takes it from the base project. Pass one of the names.
+	bool ConfirmRenameFromBase(const std::string& sliderName, const std::string& shapeName);
 	void CreateSetSliders();
 
 	void UpdateReferenceTemplates();
@@ -1195,19 +1314,48 @@ public:
 	void SetSliderValue(const size_t index, int val);
 	void SetSliderValue(const std::string& name, int val);
 	void ZeroSliders();
+	// Shows the slider values of the project on the slider panels
+	void SyncSliderPanels();
 
+	// Shows the shape as the sliders and pose have it, along with the pose rotations its model space
+	// normals need
+	void UpdateLiveMesh(nifly::NiShape* shape, bool updateBVH, bool updateUVs = false);
 	void ApplySliders(bool recalcBVH = true);
 
 	void ShowSliderEffect(const std::string& sliderName, bool show = true);
 	wxSliderPanel* GetSliderPanel(const std::string& sliderName);
 
 	void SelectShape(const std::string& shapeName);
+	// Selects the shapes by name, the first one becomes the active shape.
+	// Returns false without changing the selection if a shape doesn't exist.
+	bool SelectShapes(const std::vector<std::string>& shapeNames);
+	std::vector<std::string> GetSelectedShapeNames();
+
+	bool GetShapeDisplayMode(const std::string& shapeName, ShapeDisplayMode& outMode);
+	bool SetShapeDisplayMode(const std::string& shapeName, ShapeDisplayMode mode);
+
+	// Point the camera at shapes, at vertices of a shape, or at the area weighted to a bone.
+	// Keep the camera rotation and return false if there is nothing to look at.
+	bool FrameShapes(const std::vector<std::string>& shapeNames);
+	bool FrameVertices(const std::string& shapeName, const std::vector<int>& vertices);
+	bool FrameBone(const std::string& boneName, float minWeight = 0.1f);
+
+	// Shows the shapes' own vertex colors again, e.g. after a heatmap
+	void FillVertexColors();
+
+	ViewState GetViewState();
+	// Also updates the menu and toolbar items of the display toggles
+	void SetViewState(const ViewState& state);
 	std::vector<std::string> GetShapeList();
 
 	void UpdateShapeSource(nifly::NiShape* shape);
 	void UpdateVertexColors();
 
 	void ActiveShapesUpdated(UndoStateProject* usp, bool bIsUndo = false);
+	// Refreshes the parts of the GUI that an operation reported as changed
+	void ApplyRefresh(RefreshFlags flags);
+	// Returns the project to a snapshot and rebuilds the GUI for it. Clears the undo history.
+	void RestoreEditSnapshot(const EditSnapshot& snapshot);
 	void UpdateActiveShape();
 	bool ConfirmSliderDataLocalForEdit(nifly::NiShape* shape, const std::string& sliderName);
 	bool ConfirmSliderDataLocalForEdit(const std::vector<nifly::NiShape*>& shapes, const std::vector<std::string>& sliderNames);
@@ -1230,6 +1378,7 @@ public:
 
 	void ShowPartition(const wxTreeItemId& item = nullptr);
 	void RefreshActivePartitionTree();
+	void RefreshActiveSegmentTree();
 	void UpdatePartitionNames();
 	void ApplyPartitionVisibility(Mesh* m);
 	void ResetPartitionVisibility();
@@ -1250,8 +1399,6 @@ public:
 	void UpdateShapeReference(nifly::NiShape* shape, nifly::NiShape* newShape);
 	std::vector<ShapeItemData*>& GetSelectedItems();
 	void ClearSelected(nifly::NiShape* shape);
-	bool GetShapeReferenceSource(nifly::NiShape* shape, std::string& outProjectFile, std::string& outProjectName);
-	void SetShapeReferenceSource(nifly::NiShape* shape, const std::string& projectFile, const std::string& projectName);
 	std::string GetActiveBone();
 
 	bool CheckEditableState();
@@ -1276,6 +1423,10 @@ public:
 	int ConformShapes(std::vector<nifly::NiShape*> shapes, bool silent = false);
 	void SetBaseShape();
 	void UpdateTitle();
+	// "Add-on of <base>" or "Variant of <base>", empty for a project without a base project
+	wxString BaseProjectLabel() const;
+	void UpdateProjectNode();
+	wxString ProjectNodeTooltip() const;
 
 	void CheckBrushBounds() {
 		TweakBrush* brush = glView->GetActiveBrush();
@@ -1311,6 +1462,8 @@ public:
 	wxGauge* progressBar = nullptr;
 	std::vector<std::pair<int, int>> progressStack;
 	int progressVal = 0;
+	// Told the progress (0 to 10000) and message while a progress bar shows, e.g. to report it over MCP
+	std::function<void(int value, const wxString& msg)> progressListener;
 
 	void StartProgress(const wxString& msg = "") {
 		if (progressStack.empty()) {
@@ -1327,10 +1480,16 @@ public:
 				statusBar->SetStatusText(_("Starting..."));
 			else
 				statusBar->SetStatusText(msg);
+
+			if (progressListener)
+				progressListener(0, msg);
 		}
 	}
 
 	void StartSubProgress(int min, int max) {
+		if (progressStack.empty())
+			return;
+
 		int range = progressStack.back().second - progressStack.back().first;
 		float mindiv = min / 100.0f;
 		float maxdiv = max / 100.0f;
@@ -1358,6 +1517,9 @@ public:
 			else
 				statusBar->SetStatusText(msg);
 
+			if (progressListener)
+				progressListener(10000, msg);
+
 			delete progressBar;
 			progressBar = nullptr;
 			wxEndBusyCursor();
@@ -1378,6 +1540,9 @@ public:
 
 		statusBar->SetStatusText(msg);
 		progressBar->SetValue(progressVal);
+
+		if (progressListener)
+			progressListener(progressVal, msg);
 	}
 
 private:
@@ -1386,8 +1551,6 @@ private:
 	bool selectionLocked = false;
 	std::vector<ShapeItemData*> selectedItems;
 	bool recursingUI = false;
-	std::string activeBone;
-	std::string autoXMirrorBone;
 	wxTreeItemId activeSegment;
 	wxTreeItemId activePartition;
 	std::string lastCheckedSlider;
@@ -1407,7 +1570,6 @@ private:
 	void RenameProject(const std::string& projectName);
 
 	void UpdateMeshFromSet(nifly::NiShape* shape);
-	void FillVertexColors();
 
 	bool ShapeSelectionCheck();
 
@@ -1430,6 +1592,8 @@ private:
 	void OnChooseTargetGame(wxCommandEvent& event);
 	void SettingsFillDataFiles(wxCheckListBox* dataFileList, wxString& dataDir, int targetGame);
 	void OnSettings(wxCommandEvent& event);
+	void OnMcpServer(wxCommandEvent& event);
+	void UpdateMcpMenu();
 	void OnAbout(wxCommandEvent& event);
 	void OnLinkClicked(wxHtmlLinkEvent& link);
 
@@ -1514,6 +1678,7 @@ private:
 	void OnShapeContext(wxTreeEvent& event);
 	void OnShapeDrag(wxTreeEvent& event);
 	void OnShapeDrop(wxTreeEvent& event);
+	void OnShapeTooltip(wxTreeEvent& event);
 	void OnCheckTreeSel(wxTreeEvent& event);
 
 	void OnShapeTreeMotion(wxMouseEvent& event);
@@ -1594,7 +1759,6 @@ private:
 	void OnLoadPreset(wxCommandEvent& event);
 	void OnSavePreset(wxCommandEvent& event);
 	bool ShowConform(ConformOptions& options, bool silent = false);
-	void ConformSliders(nifly::NiShape* shape, const ConformOptions& options);
 	void OnSliderConform(wxCommandEvent& event);
 	void OnSliderConformAll(wxCommandEvent& event);
 	void OnSliderImportNIF(wxCommandEvent& event);
@@ -1617,6 +1781,7 @@ private:
 	void OnNewCombinedSlider(wxCommandEvent& event);
 	void OnSliderClone(wxCommandEvent& event);
 	void OnSliderNegate(wxCommandEvent& event);
+	void OnSliderRigidify(wxCommandEvent& event);
 	void OnMaskAffected(wxCommandEvent& event);
 	void OnClearSlider(wxCommandEvent& event);
 	void OnDeleteSlider(wxCommandEvent& event);
@@ -1633,7 +1798,7 @@ private:
 							const std::vector<nifly::Vector3>& outfitVerts,
 							const ClippingFixOptions& options,
 							UndoStateProject* usp,
-							const std::unordered_set<uint16_t>* allowedVerts = nullptr);
+							const std::vector<float>& fixWeights = {});
 
 	void OnInvertUV(wxCommandEvent& event);
 	void OnMirrorShape(wxCommandEvent& event);

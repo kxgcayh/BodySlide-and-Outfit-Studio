@@ -4,6 +4,7 @@ See the included LICENSE file
 */
 
 #include "GLSurface.h"
+#include "GLOffscreenBuffer.h"
 #include "../utils/ConfigurationManager.h"
 
 #include <wx/log.h>
@@ -39,41 +40,53 @@ const wxGLAttributes& GLSurface::GetGLAttribs() {
 	static wxGLAttributes attribs;
 
 	if (!attribsInitialized) {
-		// 16x AA
-		attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(1).Samplers(16).EndList();
+		// 10 bits per channel keeps smooth gradients like an HDRi sky from banding. The 16-bit float
+		// environment would otherwise be cut down to 8 bits in the very last step. It can be turned off
+		// for drivers whose 10-bit formats misbehave.
+		const bool tryTenBit = Config.GetBoolValue("Rendering/TenBitColor", true);
 
-		bool displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
-		if (!displaySupported) {
-			wxLogWarning("OpenGL attributes with 16x AA not supported. Trying out different ones...");
-			attribs.Reset();
+		// Anti-aliasing is never given up for 10-bit color: each sample count tries both depths
+		// before the next lower count is tried.
+		const int sampleCounts[] = {16, 8, 4, 0};
 
-			// 8x AA
-			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(1).Samplers(8).EndList();
-			displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
-		}
+		bool displaySupported = false;
+		for (const int samples : sampleCounts) {
+			for (const bool tenBit : {true, false}) {
+				if (tenBit && !tryTenBit)
+					continue;
 
-		if (!displaySupported) {
-			wxLogWarning("OpenGL attributes with 8x AA not supported. Trying out different ones...");
-			attribs.Reset();
+				attribs.Reset();
+				attribs.PlatformDefaults().DoubleBuffer().RGBA();
+				if (tenBit)
+					attribs.MinRGBA(10, 10, 10, 2);
 
-			// 4x AA
-			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(1).Samplers(4).EndList();
-			displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
-		}
+				attribs.Depth(24).SampleBuffers(samples > 0 ? 1 : 0);
+				if (samples > 0)
+					attribs.Samplers(samples);
 
-		if (!displaySupported) {
-			wxLogWarning("OpenGL attributes with 4x AA not supported. Trying out different ones...");
-			attribs.Reset();
+				attribs.EndList();
 
-			// No AA
-			attribs.PlatformDefaults().DoubleBuffer().RGBA().Depth(24).SampleBuffers(0).EndList();
-			displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
+				const wxString description = wxString::Format("%s color and %s", tenBit ? "10-bit" : "8-bit", samples > 0 ? wxString::Format("%dx AA", samples) : wxString("no AA"));
+
+				displaySupported = wxGLCanvas::IsDisplaySupported(attribs);
+				if (displaySupported) {
+					wxLogMessage("OpenGL attributes with %s are supported.", description);
+					break;
+				}
+
+				// Most drivers offer no 10-bit formats at all, so that alone is nothing to warn about.
+				if (tenBit)
+					wxLogMessage("OpenGL attributes with %s not supported. Trying out different ones...", description);
+				else
+					wxLogWarning("OpenGL attributes with %s not supported. Trying out different ones...", description);
+			}
+
+			if (displaySupported)
+				break;
 		}
 
 		if (!displaySupported)
 			wxLogWarning("No supported OpenGL attributes could be found!");
-		else
-			wxLogMessage("OpenGL attributes are supported.");
 
 		attribsInitialized = true;
 	}
@@ -125,6 +138,18 @@ int GLSurface::Initialize(wxGLCanvas* can, wxGLContext* ctx) {
 
 	InitGLExtensions();
 	DisableVSyncUnderWine();
+
+	// What the window actually got, which can be less than what was asked for. This is how a
+	// 10-bit request that the driver or display turned down shows up.
+	if (glGetFramebufferAttachmentParameteriv) {
+		GLint red = 0, green = 0, blue = 0, alpha = 0;
+		glBindFramebuffer(GL_FRAMEBUFFER, 0);
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_RED_SIZE, &red);
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_GREEN_SIZE, &green);
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_BLUE_SIZE, &blue);
+		glGetFramebufferAttachmentParameteriv(GL_FRAMEBUFFER, GL_BACK_LEFT, GL_FRAMEBUFFER_ATTACHMENT_ALPHA_SIZE, &alpha);
+		wxLogMessage(wxString::Format("-> Color:    R%d G%d B%d A%d", red, green, blue, alpha));
+	}
 	return InitGLSettings();
 }
 
@@ -302,6 +327,66 @@ void GLSurface::SetView(const char type) {
 	}
 }
 
+bool GLSurface::SetViewPreset(const std::string& name) {
+	// Pitch and yaw in degrees, the same turntable angles the mouse changes
+	static const std::pair<const char*, Vector3> presets[] = {
+		{"front", Vector3(0.0f, 0.0f, 0.0f)},
+		{"back", Vector3(0.0f, 180.0f, 0.0f)},
+		{"left", Vector3(0.0f, -90.0f, 0.0f)},
+		{"right", Vector3(0.0f, 90.0f, 0.0f)},
+		{"top", Vector3(90.0f, 0.0f, 0.0f)},
+		{"bottom", Vector3(-90.0f, 0.0f, 0.0f)},
+	};
+
+	for (auto& preset : presets) {
+		if (name == preset.first) {
+			camRot = preset.second;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void GLSurface::FrameModelPoints(const std::vector<Vector3>& points, float margin) {
+	if (points.empty())
+		return;
+
+	Vector3 minPoint = points.front();
+	Vector3 maxPoint = points.front();
+	for (auto& p : points) {
+		minPoint.x = std::min(minPoint.x, p.x);
+		minPoint.y = std::min(minPoint.y, p.y);
+		minPoint.z = std::min(minPoint.z, p.z);
+		maxPoint.x = std::max(maxPoint.x, p.x);
+		maxPoint.y = std::max(maxPoint.y, p.y);
+		maxPoint.z = std::max(maxPoint.z, p.z);
+	}
+
+	Vector3 center = (minPoint + maxPoint) * 0.5f;
+	float radius = 0.0f;
+	for (auto& p : points)
+		radius = std::max(radius, (p - center).length());
+	radius = std::max(radius, 0.01f) * margin;
+
+	// The camera turns around the point the offset moves to the origin
+	camOffset = center * -1.0f;
+	camRotOffset.Zero();
+
+	if (perspective) {
+		// Fit the bounding sphere into the narrower of the two fields of view
+		const float aspect = static_cast<float>(vpW) / static_cast<float>(vpH);
+		const float halfVertical = glm::radians(mFov) * 0.5f;
+		const float halfHorizontal = std::atan(std::tan(halfVertical) * aspect);
+		const float halfAngle = std::min(halfVertical, halfHorizontal);
+		camPos = Vector3(0.0f, 0.0f, -radius / std::sin(halfAngle));
+	}
+	else {
+		// The orthographic view is half as high as the camera is far from the center
+		camPos = Vector3(0.0f, 0.0f, -2.0f * radius + center.z);
+	}
+}
+
 void GLSurface::SetPerspective(const bool enabled) {
 	perspective = enabled;
 }
@@ -347,6 +432,23 @@ void GLSurface::ProjectPointToScreen(const Vector3& p, int& x, int& y) {
 	glm::vec3 res = glm::project(sp, matView, matProjection, vp);
 	x = std::round(res.x);
 	y = std::round(vpH - res.y);
+}
+
+bool GLSurface::ProjectPointToImage(const Vector3& p, uint32_t width, uint32_t height, float& x, float& y) const {
+	if (width == 0 || height == 0)
+		return false;
+
+	glm::mat4x4 projection;
+	glm::mat4x4 view;
+	ComputeCameraMatrices(static_cast<float>(width) / static_cast<float>(height), projection, view);
+
+	glm::vec4 clip = projection * view * glm::vec4(p.x, p.y, p.z, 1.0f);
+	if (clip.w <= 1e-6f)
+		return false;
+
+	x = (clip.x / clip.w * 0.5f + 0.5f) * static_cast<float>(width);
+	y = (0.5f - clip.y / clip.w * 0.5f) * static_cast<float>(height);
+	return true;
 }
 
 void GLSurface::GetPickRay(int ScreenX, int ScreenY, Mesh* m, Vector3& dirVect, Vector3& outNearPos) {
@@ -755,11 +857,14 @@ void GLSurface::GetSize(uint32_t& w, uint32_t& h) {
 }
 
 void GLSurface::UpdateProjection() {
-	float aspect = (float)vpW / (float)vpH;
+	ComputeCameraMatrices((float)vpW / (float)vpH, matProjection, matView);
+}
+
+void GLSurface::ComputeCameraMatrices(float aspect, glm::mat4x4& outProjection, glm::mat4x4& outView) const {
 	if (perspective)
-		matProjection = glm::perspective(glm::radians(mFov), aspect, zNear, zFar);
+		outProjection = glm::perspective(glm::radians(mFov), aspect, zNear, zFar);
 	else
-		matProjection = glm::ortho((camPos.z + camOffset.z) / 2.0f * aspect,
+		outProjection = glm::ortho((camPos.z + camOffset.z) / 2.0f * aspect,
 								   (-camPos.z + camOffset.z) / 2.0f * aspect,
 								   (camPos.z + camOffset.z) / 2.0f,
 								   (-camPos.z + camOffset.z) / 2.0f,
@@ -767,12 +872,12 @@ void GLSurface::UpdateProjection() {
 								   zFar);
 
 	auto mat = glm::identity<glm::mat4x4>();
-	matView = glm::translate(mat, glm::vec3(camPos.x, camPos.y, camPos.z));
-	matView = glm::translate(matView, glm::vec3(camRotOffset.x, camRotOffset.y, camRotOffset.z));
-	matView = glm::rotate(matView, glm::radians(camRot.x), glm::vec3(1.0f, 0.0f, 0.0f));
-	matView = glm::rotate(matView, glm::radians(camRot.y), glm::vec3(0.0f, 1.0f, 0.0f));
-	matView = glm::translate(matView, -glm::vec3(camRotOffset.x, camRotOffset.y, camRotOffset.z));
-	matView = glm::translate(matView, glm::vec3(camOffset.x, camOffset.y, camOffset.z));
+	outView = glm::translate(mat, glm::vec3(camPos.x, camPos.y, camPos.z));
+	outView = glm::translate(outView, glm::vec3(camRotOffset.x, camRotOffset.y, camRotOffset.z));
+	outView = glm::rotate(outView, glm::radians(camRot.x), glm::vec3(1.0f, 0.0f, 0.0f));
+	outView = glm::rotate(outView, glm::radians(camRot.y), glm::vec3(0.0f, 1.0f, 0.0f));
+	outView = glm::translate(outView, -glm::vec3(camRotOffset.x, camRotOffset.y, camRotOffset.z));
+	outView = glm::translate(outView, glm::vec3(camOffset.x, camOffset.y, camOffset.z));
 }
 
 void GLSurface::RenderFullScreenQuad(GLMaterial* renderShader, unsigned int w, unsigned int h) {
@@ -863,7 +968,53 @@ void GLSurface::RenderOneFrame() {
 		return;
 
 	canvas->SetCurrent(*context);
+	RenderScene();
+	canvas->SwapBuffers();
+}
 
+bool GLSurface::RenderToImage(uint32_t width, uint32_t height, std::vector<uint8_t>& outRGBA, int samples) {
+	if (!canvas || width == 0 || height == 0 || !SetContext())
+		return false;
+
+	// The projection follows the viewport size, so render with the image's aspect ratio
+	const uint32_t savedW = vpW;
+	const uint32_t savedH = vpH;
+	vpW = width;
+	vpH = height;
+
+	bool rendered = false;
+	{
+		GLOffScreenBuffer buffer(this, static_cast<int>(width), static_cast<int>(height), 1, std::vector<GLuint>(), samples);
+		buffer.Start();
+
+		// Sizes or sample counts the driver can't do leave the framebuffer incomplete
+		if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+			RenderScene();
+			buffer.Resolve();
+
+			std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
+			glPixelStorei(GL_PACK_ALIGNMENT, 1);
+			glReadPixels(0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+
+			// OpenGL rows start at the bottom
+			const size_t rowSize = static_cast<size_t>(width) * 4;
+			outRGBA.resize(pixels.size());
+			for (uint32_t y = 0; y < height; y++)
+				std::copy_n(pixels.data() + (height - 1 - y) * rowSize, rowSize, outRGBA.data() + y * rowSize);
+			rendered = true;
+		}
+
+		buffer.End();
+	}
+
+	vpW = savedW;
+	vpH = savedH;
+	UpdateProjection();
+	glViewport(0, 0, static_cast<GLsizei>(vpW * canvas->GetContentScaleFactor()), static_cast<GLsizei>(vpH * canvas->GetContentScaleFactor()));
+	return rendered;
+}
+
+void GLSurface::RenderScene() {
 	glClearColor(colorBackground.x, colorBackground.y, colorBackground.z, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
@@ -916,9 +1067,6 @@ void GLSurface::RenderOneFrame() {
 			RenderMesh(o);
 		}
 	}
-
-	canvas->SwapBuffers();
-	return;
 }
 
 void GLSurface::RenderMesh(Mesh* m) {
@@ -1083,6 +1231,12 @@ void GLSurface::RenderMesh(Mesh* m) {
 			glVertexAttribPointer(8, 1, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0); // Weight
 		}
 
+		if (m->poseRotations) {
+			glBindBuffer(GL_ARRAY_BUFFER, m->vbo[10]);
+			glEnableVertexAttribArray(10);
+			glVertexAttribPointer(10, 4, GL_FLOAT, GL_FALSE, 0, (GLvoid*)0); // Pose rotations
+		}
+
 		GLuint subMeshesSize = 0;
 		if (!m->subMeshes.empty()) {
 			auto& lastSubMesh = m->subMeshes.back();
@@ -1131,6 +1285,8 @@ void GLSurface::RenderMesh(Mesh* m) {
 			glDisableVertexAttribArray(9);
 		}
 
+		// Without its array the attribute is the identity rotation, (0, 0, 0, 1) being GL's default
+		glDisableVertexAttribArray(10);
 		glDisableVertexAttribArray(5);
 		glDisableVertexAttribArray(4);
 		glDisableVertexAttribArray(3);
@@ -1346,8 +1502,9 @@ void GLSurface::UpdateShaders(Mesh* m) {
 		shader.ShowLighting(bLighting);
 		shader.ShowMask(bMaskVisible && m->mask);
 		shader.ShowWeight(bWeightColors && m->weight);
-		shader.ShowVertexColors(bVertexColors && m->vcolors && m->vertexColors);
-		shader.ShowVertexAlpha(bVertexColors && m->valpha && m->vertexColors && m->vertexAlpha);
+		const bool showColors = m->vertexColors || m->overrideVertexColors;
+		shader.ShowVertexColors(bVertexColors && m->vcolors && showColors);
+		shader.ShowVertexAlpha(bVertexColors && m->valpha && showColors && m->vertexAlpha);
 		shader.SetProperties(m->prop);
 	}
 }
@@ -1358,242 +1515,9 @@ Mesh* GLSurface::ReloadMeshFromNif(NifFile* nif, std::string shapeName) {
 }
 
 Mesh* GLSurface::AddMeshFromNif(NifFile* nif, const std::string& shapeName, Vector3* color) {
-	auto shape = nif->FindBlockByName<NiShape>(shapeName);
-	if (!shape)
+	Mesh* m = Mesh::CreateFromShape(nif, shapeName).release();
+	if (!m)
 		return nullptr;
-
-	std::vector<Vector3> nifVerts;
-	nif->GetVertsForShape(shape, nifVerts);
-
-	std::vector<Triangle> nifTris;
-	shape->GetTriangles(nifTris);
-
-	const std::vector<Vector3>* nifNorms = nif->GetNormalsForShape(shape);
-	const std::vector<Vector2>* nifUvs = nif->GetUvsForShape(shape);
-
-	Mesh* m = new Mesh();
-
-	if (!shape->IsSkinned()) {
-		// Calculate transform from shape's CS to global CS
-		MatTransform ttg = shape->GetTransformToParent();
-		NiNode* parent = nif->GetParentNode(shape);
-		while (parent) {
-			ttg = parent->GetTransformToParent().ComposeTransforms(ttg);
-			parent = nif->GetParentNode(parent);
-		}
-
-		m->SetXformMeshToModel(Mesh::xformNifToMesh.ComposeTransforms(ttg.ComposeTransforms(Mesh::xformMeshToNif)));
-	}
-	else {
-		// Skinned meshes
-		MatTransform xformGlobalToSkin;
-		if (nif->CalcShapeTransformGlobalToSkin(shape, xformGlobalToSkin)) {
-			m->SetXformModelToMesh(Mesh::xformNifToMesh.ComposeTransforms(xformGlobalToSkin.ComposeTransforms(Mesh::xformMeshToNif)));
-		}
-	}
-
-	NiShader* shader = nif->GetShader(shape);
-	m->hasShader = shader != nullptr;
-	m->bHelperShape = !shader || (shape->flags & 1) != 0;
-	if (shader) {
-		m->doublesided = shader->IsDoubleSided();
-		m->modelSpace = shader->IsModelSpace();
-		m->emissive = shader->IsEmissive();
-		m->specular = shader->HasSpecular();
-		m->vertexColors = shader->HasVertexColors();
-		m->vertexAlpha = shader->HasVertexAlpha();
-		m->glowmap = shader->HasGlowmap();
-		m->greyscaleColor = shader->HasGreyscaleColor();
-		m->cubemap = shader->HasEnvironmentMapping();
-
-		if (nif->GetHeader().GetVersion().Stream() < 130) {
-			m->backlight = shader->HasBacklight();
-			m->backlightMap = m->backlight; // Dedicated map pre-130
-			m->rimlight = shader->HasRimlight();
-			m->softlight = shader->HasSoftlight();
-			m->prop.rimlightPower = shader->GetRimlightPower();
-			m->prop.softlighting = shader->GetSoftlight();
-		}
-		else {
-			m->backlight = (shader->GetBacklightPower() > 0.0);
-			m->softlight = (shader->GetSubsurfaceRolloff() > 0.0);
-			m->prop.subsurfaceRolloff = shader->GetSubsurfaceRolloff();
-		}
-
-		m->prop.uvOffset = shader->GetUVOffset();
-		m->prop.uvScale = shader->GetUVScale();
-		m->prop.specularColor = shader->GetSpecularColor();
-		m->prop.specularStrength = shader->GetSpecularStrength();
-		m->prop.shininess = shader->GetGlossiness();
-		m->prop.envReflection = shader->GetEnvironmentMapScale();
-		m->prop.backlightPower = shader->GetBacklightPower();
-		m->prop.paletteScale = shader->GetGrayscaleToPaletteScale();
-		m->prop.fresnelPower = shader->GetFresnelPower();
-
-		Color4 emissiveColor = shader->GetEmissiveColor();
-		m->prop.emissiveColor = Vector3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
-		m->prop.emissiveMultiple = shader->GetEmissiveMultiple();
-
-		m->prop.alpha = shader->GetAlpha();
-
-		// Everything that has to come off the lighting shader property itself rather than off the
-		// NiShader interface: the tint colors of the shader types that have one, and the True PBR flag.
-		if (!nif->GetHeader().GetVersion().IsSF()) {
-			auto* bslsp = dynamic_cast<BSLightingShaderProperty*>(shader);
-			if (bslsp) {
-				// Community Shaders "True PBR", which a shape asks for with Shader Flags 2 bit 23 - the bit
-				// NifSkope shows as "Unused 01". Only asked of Skyrim: Fallout 4 shares the block type and
-				// spends that bit on something else, and its shapes have their own shader either way.
-				// The multi layer parallax shader type counts alongside the default one, since True PBR
-				// borrows it purely as somewhere to keep its coat, fuzz and glint parameters. Such a shape
-				// still holds its RMAOS map in slot 5, and reading that as one is far closer than falling
-				// back to vanilla, which would take the same map for an environment mask.
-				if (nif->GetHeader().GetVersion().Stream() < 130) {
-					const uint32_t bslspType = bslsp->GetShaderType();
-					m->pbr = (bslsp->shaderFlags2 & SLSF2_UNUSED01) != 0
-							 && (bslspType == BSLightingShaderPropertyShaderType::BSLSP_DEFAULT
-								 || bslspType == BSLightingShaderPropertyShaderType::BSLSP_MULTILAYERPARALLAX);
-
-					if (m->pbr)
-						wxLogMessage("Shape '%s' was detected as a True PBR material.", shapeName);
-				}
-
-				// Face tint map (FaceGen) of the face tint shader type, always in texture slot 6
-				m->faceTint = bslsp->GetShaderType() == BSLightingShaderPropertyShaderType::BSLSP_FACE;
-
-				if (bslsp->GetShaderType() == BSLightingShaderPropertyShaderType::BSLSP_SKINTINT) {
-					m->tintType = Mesh::TintType::Skin;
-					m->prop.tintColor = bslsp->skinTintColor;
-				}
-				else if (bslsp->GetShaderType() == BSLightingShaderPropertyShaderType::BSLSP_HAIRTINT) {
-					m->tintType = Mesh::TintType::Hair;
-					m->prop.tintColor = bslsp->hairTintColor;
-				}
-			}
-		}
-	}
-
-	NiMaterialProperty* material = nif->GetMaterialProperty(shape);
-	if (material) {
-		m->emissive = material->IsEmissive();
-
-		m->prop.specularColor = material->GetSpecularColor();
-		m->prop.shininess = material->GetGlossiness();
-
-		Color4 emissiveColor = material->GetEmissiveColor();
-		m->prop.emissiveColor = Vector3(emissiveColor.r, emissiveColor.g, emissiveColor.b);
-		m->prop.emissiveMultiple = material->GetEmissiveMultiple();
-
-		m->prop.alpha = material->GetAlpha();
-	}
-
-	NiStencilProperty* stencil = nif->GetStencilProperty(shape);
-	if (stencil) {
-		int drawMode = (stencil->flags & DRAW_MASK) >> DRAW_POS;
-
-		switch (drawMode) {
-			case DRAW_CW:
-				m->doublesided = false;
-				m->cullMode = GL_FRONT;
-				break;
-			case DRAW_BOTH:
-				m->doublesided = true;
-				m->cullMode = GL_BACK;
-				break;
-			case DRAW_CCW:
-			default:
-				m->doublesided = false;
-				m->cullMode = GL_BACK;
-				break;
-		}
-	}
-
-	NiAlphaProperty* alphaProp = nif->GetAlphaProperty(shape);
-	if (alphaProp) {
-		m->alphaFlags = alphaProp->flags;
-		m->alphaThreshold = alphaProp->threshold;
-	}
-
-	m->nVerts = nifVerts.size();
-	m->nTris = nifTris.size();
-
-	if (m->nVerts > 0) {
-		m->verts = std::make_unique<Vector3[]>(m->nVerts);
-		m->norms = std::make_unique<Vector3[]>(m->nVerts);
-		m->tangents = std::make_unique<Vector3[]>(m->nVerts);
-		m->bitangents = std::make_unique<Vector3[]>(m->nVerts);
-		m->vcolors = std::make_unique<Vector3[]>(m->nVerts);
-		m->valpha = std::make_unique<float[]>(m->nVerts);
-		m->texcoord = std::make_unique<Vector2[]>(m->nVerts);
-		m->mask = std::make_unique<float[]>(m->nVerts);
-		m->weight = std::make_unique<float[]>(m->nVerts);
-	}
-
-	if (m->nTris > 0)
-		m->tris = std::make_unique<Triangle[]>(m->nTris);
-
-	m->shapeName = shapeName;
-
-	// Load verts. NIF verts are scaled up by approx. 10 and rotated on the x axis (Z up, Y forward).
-	// Scale down by 10 and rotate on x axis by flipping y and z components. To face the camera, this also mirrors
-	// on X and Y (180 degree y axis rotation.)
-	for (int i = 0; i < m->nVerts; i++)
-		m->verts[i] = Mesh::TransformPosNifToMesh(nifVerts[i]);
-
-	if (nifUvs && !nifUvs->empty()) {
-		for (int i = 0; i < m->nVerts; i++) {
-			m->texcoord[i].u = (*nifUvs)[i].u;
-			m->texcoord[i].v = (*nifUvs)[i].v;
-		}
-		m->textured = true;
-	}
-
-	// A Starfield material can map a layer or blender with the second UV channel instead
-	if (nif->GetHeader().GetVersion().IsSF()) {
-		NiGeometryData* geomData = nif->GetGeometryData(shape);
-		if (geomData && geomData->uvSets.size() > 1 && geomData->uvSets[1].size() == static_cast<size_t>(m->nVerts)) {
-			m->texcoord2 = std::make_unique<Vector2[]>(m->nVerts);
-			std::copy(geomData->uvSets[1].begin(), geomData->uvSets[1].end(), m->texcoord2.get());
-		}
-	}
-
-	// Copy triangles
-	for (int t = 0; t < m->nTris; t++)
-		m->tris[t] = nifTris[t];
-
-	if (!nifNorms || nifNorms->empty()) {
-		// Calc weldVerts and normals
-		m->SmoothNormals();
-	}
-	else {
-		// Already have normals, just copy the data over.
-		// Copy normals. Note, normals are transformed the same way the vertices are.
-		for (int i = 0; i < m->nVerts; i++)
-			m->norms[i] = Mesh::TransformDirNifToMesh((*nifNorms)[i]);
-
-		for (auto& extraDataRef : shape->extraDataRefs) {
-			auto integersExtraData = nif->GetHeader().GetBlock<NiIntegersExtraData>(extraDataRef);
-			if (integersExtraData && integersExtraData->name == "LOCKEDNORM")
-				for (auto& i : integersExtraData->integersData)
-					m->lockedNormalIndices.insert(i);
-		}
-
-		// Virtually weld verts across UV seams
-		m->CalcWeldVerts();
-	}
-
-	std::vector<Color4> vColors;
-	if (nif->GetColorsForShape(shape, vColors)) {
-		for (size_t v = 0; v < vColors.size(); v++) {
-			m->vcolors[v].x = vColors.at(v).r;
-			m->vcolors[v].y = vColors.at(v).g;
-			m->vcolors[v].z = vColors.at(v).b;
-			m->valpha[v] = vColors.at(v).a;
-		}
-	}
-
-	m->CalcTangentSpace();
-	m->CreateBVH();
 
 	if (color)
 		m->color = (*color);
@@ -2515,7 +2439,7 @@ bool GLSurface::SetHDRiBackground(const std::string& fileName) {
 		return false;
 
 	std::string error;
-	if (!hdri.Load(fileName.empty() ? fileName : Config["AppDir"] + "/res/hdri/" + fileName, error)) {
+	if (!hdri.Load(fileName.empty() ? fileName : Config["AppDir"] + "/res/hdri/" + fileName, error, largestAF)) {
 		wxLogError("Failed to load HDRi '%s': %s", fileName, error);
 
 		// A half-loaded environment would leave the cube map slots it stands in for pointing at

@@ -3,16 +3,21 @@ BodySlide and Outfit Studio
 See the included LICENSE file
 */
 
-#include "AutomationDialog.h"
+#include "AutomationRunner.h"
 
+#include "BrushStrokeController.h"
+#include "GameImport.h"
 #include "OutfitProject.h"
 #include "OutfitStudio.h"
 
 #include "../components/ClippingFixer.h"
 #include "../components/DiffData.h"
+#include "../components/MaskOps.h"
+#include "../components/MeshAnalysis.h"
 #include "../components/UndoState.h"
 #include "../files/MaskFile.h"
 #include "../files/TriFile.h"
+#include "../utils/ProjectUtil.h"
 #include "../utils/StringStuff.h"
 
 #include <NifFile.hpp>
@@ -519,7 +524,8 @@ bool ParseAutomationPartitionID(const std::string& value, int& partitionID) {
 		return false;
 
 	std::smatch match;
-	static const std::regex partitionChoicePattern("^([0-9]+)\\s+.+$");
+	// A slot number, alone or as the partition choices show it ("32 Body")
+	static const std::regex partitionChoicePattern("^([0-9]+)(\\s+.+)?$");
 	if (!std::regex_match(trimmedValue, match, partitionChoicePattern))
 		return false;
 
@@ -537,7 +543,237 @@ bool ParseAutomationPartitionID(const std::string& value, int& partitionID) {
 }
 }
 
-bool AutomationDialog::StepChangesSliderSet(AutomationStepType type) {
+AutomationRunner::AutomationRunner(OutfitStudioFrame* inOutfitStudio)
+	: outfitStudio(inOutfitStudio)
+	, project(inOutfitStudio->project) {}
+
+void AutomationRunner::SyncProject() {
+	project = outfitStudio->project;
+}
+
+void AutomationRunner::BeginRun(const std::map<std::string, std::string>& baseVariables) {
+	runBaseVariables = baseVariables;
+	runtimeVariables.clear();
+}
+
+int AutomationRunner::RunStep(const AutomationStep& scriptStep, AutomationStep* executedStep) {
+	// Copied so Set Variable steps earlier in the run can still fill in
+	// placeholders that were unknown when the script was substituted
+	AutomationStep step = scriptStep;
+	if (!runtimeVariables.empty())
+		SubstituteStepPlaceholders(step, runtimeVariables);
+
+	int err = ExecuteStep(step);
+	RefreshAfterStep(step);
+
+	if (executedStep)
+		*executedStep = step;
+	return err;
+}
+
+void AutomationRunner::RefreshAfterStep(const AutomationStep& step) {
+	SyncProject();
+	outfitStudio->RefreshGUIFromProj();
+
+	if (StepChangesSliderSet(step.type))
+		outfitStudio->CreateSetSliders();
+
+	outfitStudio->ApplySliders();
+}
+
+int AutomationRunner::ExecuteStep(const AutomationStep& step) {
+	using ExecuteFn = int (AutomationRunner::*)(const AutomationStep&);
+	struct Binding {
+		AutomationStepType type;
+		ExecuteFn execute;
+	};
+
+	static const Binding bindings[] = {
+		{AutomationStepType::AddCustomBone, &AutomationRunner::ExecuteStepAddCustomBone},
+		{AutomationStepType::CopyBoneWeights, &AutomationRunner::ExecuteStepCopyBoneWeights},
+		{AutomationStepType::DeleteBones, &AutomationRunner::ExecuteStepDeleteBones},
+		{AutomationStepType::EditBone, &AutomationRunner::ExecuteStepEditBone},
+		{AutomationStepType::RemoveSkinning, &AutomationRunner::ExecuteStepRemoveSkinning},
+		{AutomationStepType::ExportFile, &AutomationRunner::ExecuteStepExportFile},
+		{AutomationStepType::ExportSFMorphs, &AutomationRunner::ExecuteStepExportSFMorphs},
+		{AutomationStepType::SaveProject, &AutomationRunner::ExecuteStepSaveProject},
+		{AutomationStepType::ImportFile, &AutomationRunner::ExecuteStepImportFile},
+		{AutomationStepType::ImportFromGame, &AutomationRunner::ExecuteStepImportFromGame},
+		{AutomationStepType::ImportSliderData, &AutomationRunner::ExecuteStepImportSliderData},
+		{AutomationStepType::AddProject, &AutomationRunner::ExecuteStepAddProject},
+		{AutomationStepType::ClearProject, &AutomationRunner::ExecuteStepClearProject},
+		{AutomationStepType::ClearReference, &AutomationRunner::ExecuteStepClearReference},
+		{AutomationStepType::LoadReference, &AutomationRunner::ExecuteStepLoadReference},
+		{AutomationStepType::SetBaseShape, &AutomationRunner::ExecuteStepSetBaseShape},
+		{AutomationStepType::SetReferenceShape, &AutomationRunner::ExecuteStepSetReferenceShape},
+		{AutomationStepType::ApplyPose, &AutomationRunner::ExecuteStepApplyPose},
+		{AutomationStepType::DeleteShape, &AutomationRunner::ExecuteStepDeleteShape},
+		{AutomationStepType::DuplicateShape, &AutomationRunner::ExecuteStepDuplicateShape},
+		{AutomationStepType::ChangePartitions, &AutomationRunner::ExecuteStepChangePartitions},
+		{AutomationStepType::FixBadBones, &AutomationRunner::ExecuteStepFixBadBones},
+		{AutomationStepType::FixClipping, &AutomationRunner::ExecuteStepFixClipping},
+		{AutomationStepType::InvertUVs, &AutomationRunner::ExecuteStepInvertUVs},
+		{AutomationStepType::MirrorShape, &AutomationRunner::ExecuteStepMirrorShape},
+		{AutomationStepType::RecalcNormals, &AutomationRunner::ExecuteStepRecalcNormals},
+		{AutomationStepType::RefineMesh, &AutomationRunner::ExecuteStepRefineMesh},
+		{AutomationStepType::RenameShape, &AutomationRunner::ExecuteStepRenameShape},
+		{AutomationStepType::ApplyTransforms, &AutomationRunner::ExecuteStepApplyTransforms},
+		{AutomationStepType::ResetTransforms, &AutomationRunner::ExecuteStepResetTransforms},
+		{AutomationStepType::TransformShape, &AutomationRunner::ExecuteStepTransformShape},
+		{AutomationStepType::SetGeometryProperties, &AutomationRunner::ExecuteStepSetGeometryProperties},
+		{AutomationStepType::SetExtraData, &AutomationRunner::ExecuteStepSetExtraData},
+		{AutomationStepType::DeleteExtraData, &AutomationRunner::ExecuteStepDeleteExtraData},
+		{AutomationStepType::ConformSliders, &AutomationRunner::ExecuteStepConformSliders},
+		{AutomationStepType::DeleteSlider, &AutomationRunner::ExecuteStepDeleteSlider},
+		{AutomationStepType::SetSliderValues, &AutomationRunner::ExecuteStepSetSliderValues},
+		{AutomationStepType::SetSliderProperties, &AutomationRunner::ExecuteStepSetSliderProperties},
+		{AutomationStepType::SetShaderProperties, &AutomationRunner::ExecuteStepSetShaderProperties},
+		{AutomationStepType::SetTexturePaths, &AutomationRunner::ExecuteStepSetTexturePaths},
+		{AutomationStepType::ClearMask, &AutomationRunner::ExecuteStepClearMask},
+		{AutomationStepType::LoadMask, &AutomationRunner::ExecuteStepLoadMask},
+		{AutomationStepType::RemoveUnusedNodes, &AutomationRunner::ExecuteStepRemoveUnusedNodes},
+		{AutomationStepType::AddBone, &AutomationRunner::ExecuteStepAddBone},
+		{AutomationStepType::TransferWeights, &AutomationRunner::ExecuteStepTransferWeights},
+		{AutomationStepType::SetBoneTransform, &AutomationRunner::ExecuteStepSetBoneTransform},
+		{AutomationStepType::MakeConversionRef, &AutomationRunner::ExecuteStepMakeConversionRef},
+		{AutomationStepType::CopySegPart, &AutomationRunner::ExecuteStepCopySegPart},
+		{AutomationStepType::DeleteVertices, &AutomationRunner::ExecuteStepDeleteVertices},
+		{AutomationStepType::SeparateVertices, &AutomationRunner::ExecuteStepSeparateVertices},
+		{AutomationStepType::MergeGeometry, &AutomationRunner::ExecuteStepMergeGeometry},
+		{AutomationStepType::SymmetrizeVertices, &AutomationRunner::ExecuteStepSymmetrizeVertices},
+		{AutomationStepType::SmoothVertices, &AutomationRunner::ExecuteStepSmoothVertices},
+		{AutomationStepType::ClearSliderData, &AutomationRunner::ExecuteStepClearSliderData},
+		{AutomationStepType::CloneSlider, &AutomationRunner::ExecuteStepCloneSlider},
+		{AutomationStepType::NegateSlider, &AutomationRunner::ExecuteStepNegateSlider},
+		{AutomationStepType::NewCombinedSlider, &AutomationRunner::ExecuteStepNewCombinedSlider},
+		{AutomationStepType::NewZapSlider, &AutomationRunner::ExecuteStepNewZapSlider},
+		{AutomationStepType::GrowShrinkMask, &AutomationRunner::ExecuteStepGrowShrinkMask},
+		{AutomationStepType::InvertMask, &AutomationRunner::ExecuteStepInvertMask},
+		{AutomationStepType::MaskAsymmetric, &AutomationRunner::ExecuteStepMaskAsymmetric},
+		{AutomationStepType::MaskBox, &AutomationRunner::ExecuteStepMaskBox},
+		{AutomationStepType::MaskCovered, &AutomationRunner::ExecuteStepMaskCovered},
+		{AutomationStepType::MaskBoneWeighted, &AutomationRunner::ExecuteStepMaskBoneWeighted},
+		{AutomationStepType::MaskSliderAffected, &AutomationRunner::ExecuteStepMaskSliderAffected},
+		{AutomationStepType::MaskWeighted, &AutomationRunner::ExecuteStepMaskWeighted},
+		{AutomationStepType::SaveMask, &AutomationRunner::ExecuteStepSaveMask},
+		{AutomationStepType::SmoothMask, &AutomationRunner::ExecuteStepSmoothMask},
+		{AutomationStepType::SetVariable, &AutomationRunner::ExecuteStepSetVariable},
+		{AutomationStepType::LogMessage, &AutomationRunner::ExecuteStepLogMessage},
+	};
+
+	static_assert(std::size(bindings) == AutomationStepTypeCount, "every AutomationStepType needs a binding");
+
+	SyncProject();
+	for (const auto& binding : bindings)
+		if (binding.type == step.type)
+			return (this->*binding.execute)(step);
+
+	return 0;
+}
+
+NiShape* AutomationRunner::FindShapeByName(const std::string& name) {
+	SyncProject();
+	auto shapes = project->GetWorkNif()->GetShapes();
+	for (auto* shape : shapes) {
+		if (shape->name.get() == name)
+			return shape;
+	}
+	return nullptr;
+}
+std::vector<NiShape*> AutomationRunner::ResolveTargetShapes(const AutomationStep& step, bool includeBaseShapeOnEmpty) {
+	SyncProject();
+	if (step.targetMeshes.empty()) {
+		auto allShapes = project->GetWorkNif()->GetShapes();
+		std::vector<NiShape*> result;
+		auto* baseShape = project->GetBaseShape();
+		for (auto* shape : allShapes) {
+			if (includeBaseShapeOnEmpty || shape != baseShape)
+				result.push_back(shape);
+		}
+		return result;
+	}
+
+	std::vector<NiShape*> result;
+	auto addUniqueShape = [&result](NiShape* shape) {
+		if (shape && std::find(result.begin(), result.end(), shape) == result.end())
+			result.push_back(shape);
+	};
+
+	if (step.targetRegex) {
+		// Patterns leave the reference out, so ".*" for every outfit shape doesn't clear or mask the body's slider
+		// data too. A step that is meant for the reference names it without TargetRegex or sets TargetReference,
+		// and steps that work on the reference when empty (MaskCovered) let patterns match it as well.
+		auto allShapes = project->GetWorkNif()->GetShapes();
+		auto* baseShape = (step.targetReference || includeBaseShapeOnEmpty) ? nullptr : project->GetBaseShape();
+		for (const auto& pattern : step.targetMeshes) {
+			try {
+				std::regex re(pattern, std::regex::icase);
+				bool matched = false;
+				for (auto* shape : allShapes) {
+					if (shape != baseShape && std::regex_search(shape->name.get(), re)) {
+						addUniqueShape(shape);
+						matched = true;
+					}
+				}
+				if (!matched)
+					wxLogWarning("Automation: Target shape regex '%s' matched no shapes.", pattern);
+			}
+			catch (const std::regex_error& e) {
+				wxLogWarning("Automation: Invalid target shape regex '%s' (%s); skipping pattern.", pattern, e.what());
+			}
+		}
+	}
+	else {
+		for (const auto& name : step.targetMeshes) {
+			NiShape* shape = FindShapeByName(name);
+			if (shape)
+				addUniqueShape(shape);
+			else
+				wxLogWarning("Automation: Target shape '%s' not found.", name);
+		}
+	}
+
+	return result;
+}
+int AutomationRunner::ImportOBJFile(const std::string& fileName) {
+	if (headlessMode)
+		return project->ImportOBJ(fileName, objImportOptions);
+
+	return outfitStudio->ImportOBJWithDialog(fileName);
+}
+void AutomationRunner::ResetAndClearProject() {
+	SyncProject();
+	project->SetBaseShape(nullptr, false);
+	// One by one, so what the project keeps by shape name (the reference's source, textures, materials) goes with
+	// them instead of passing to a shape of the same name in the next project
+	for (auto* shape : project->GetWorkNif()->GetShapes())
+		project->DeleteShape(shape);
+	project->GetWorkAnim()->Clear();
+	project->GetWorkNif()->Clear();
+	outfitStudio->ResetProject();
+	SyncProject();
+}
+wxString AutomationRunner::MakeAbsoluteToProject(const wxString& path) {
+	if (path.empty())
+		return path;
+
+	wxFileName fn(path);
+	if (!fn.IsRelative())
+		return path;
+
+	fn.MakeAbsolute(wxString::FromUTF8(ProjectUtil::GetProjectPath()));
+	return fn.GetFullPath();
+}
+#ifdef USE_FBXSDK
+int AutomationRunner::ImportFBXFile(const std::string& fileName) {
+	if (headlessMode)
+		return project->ImportFBX(fileName, FBXImportOptions());
+
+	return outfitStudio->ImportFBXWithDialog(fileName);
+}
+#endif
+
+bool AutomationRunner::StepChangesSliderSet(AutomationStepType type) {
 	switch (type) {
 		case AutomationStepType::ClearProject:
 		case AutomationStepType::LoadReference:
@@ -547,6 +783,7 @@ bool AutomationDialog::StepChangesSliderSet(AutomationStepType type) {
 		case AutomationStepType::SetBaseShape:
 		case AutomationStepType::ImportSliderData:
 		case AutomationStepType::ImportFile:
+		case AutomationStepType::ImportFromGame:
 		case AutomationStepType::CloneSlider:
 		case AutomationStepType::MakeConversionRef:
 		case AutomationStepType::NewCombinedSlider:
@@ -557,145 +794,56 @@ bool AutomationDialog::StepChangesSliderSet(AutomationStepType type) {
 	}
 }
 
-void AutomationDialog::ExecuteSteps(const std::vector<size_t>& stepIndices) {
-	lastRunErrors = 0;
-
-	// Make a copy so placeholder substitution doesn't modify the UI version
-	AutomationScript execScript;
-	for (size_t idx : stepIndices)
-		execScript.AddStep(script.GetSteps()[idx]);
-
-	// Apply placeholder substitution
-	auto vars = CollectVariables();
-	if (!vars.empty())
-		execScript.SubstitutePlaceholders(vars);
-
-	runBaseVariables = vars;
-	runtimeVariables.clear();
-
-	StartProgress(_("Running automation script..."));
-
-	int totalSteps = static_cast<int>(execScript.GetSteps().size());
-	for (int i = 0; i < totalSteps; i++) {
-		// Copied so Set Variable steps earlier in the run can still fill in
-		// placeholders that were unknown when the script was substituted
-		AutomationStep step = execScript.GetSteps()[i];
-		if (!runtimeVariables.empty())
-			SubstituteStepPlaceholders(step, runtimeVariables);
-
-		wxString stepDesc = wxString::Format(_("Step %d/%d: %s"),
-			i + 1, totalSteps,
-			wxGetTranslation(GetAutomationStepInfo(step.type).displayName));
-
-		UpdateProgress(i * 100 / totalSteps, stepDesc);
-
-		if (cancelRequested) {
-			wxLogMessage("Automation: Cancelled by user.");
-			EndProgress(_("Automation cancelled."));
-			lastRunErrors++;
-			return;
-		}
-
-		wxLogMessage("Automation: %s", stepDesc);
-
-		int err = ExecuteStep(step);
-		if (err != 0) {
-			lastRunErrors++;
-			wxString errMsg = wxString::Format(
-				_("Step %d (%s) failed with error %d.\n\n%s\n\nContinue with remaining steps?"),
-				i + 1,
-				wxGetTranslation(GetAutomationStepInfo(step.type).displayName),
-				err,
-				wxString::FromUTF8(step.note));
-
-			if (headlessMode) {
-				wxLogError("Automation: %s", errMsg);
-				// Auto-continue in headless mode
-			}
-			else {
-				int result = wxMessageBox(errMsg, _("Automation Error"), wxYES_NO | wxICON_ERROR);
-				if (result != wxYES) {
-					EndProgress(_("Automation aborted."));
-					return;
-				}
-			}
-		}
-
-		outfitStudio->RefreshGUIFromProj();
-
-		if (StepChangesSliderSet(step.type))
-			outfitStudio->CreateSetSliders();
-
-		outfitStudio->ApplySliders();
-	}
-
-	EndProgress(_("Automation complete."));
-
-	if (!headlessMode) {
-		wxMessageBox(wxString::Format(_("Automation completed: %d step(s) executed."), totalSteps),
-					 _("Automation"), wxICON_INFORMATION);
-	}
-}
-
-int AutomationDialog::ExecuteStepClearProject(const AutomationStep&) {
+int AutomationRunner::ExecuteStepClearProject(const AutomationStep&) {
 	wxLogMessage("Automation: Clearing project...");
 	ResetAndClearProject();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepLoadReference(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepLoadReference(const AutomationStep& step) {
 	if (step.refSourceFile.empty()) {
 		wxLogError("Automation: LoadReference - no source file specified.");
 		return 1;
 	}
 
-	wxString refSourceFile = MakeAbsoluteToProject(wxString::FromUTF8(step.refSourceFile));
-	wxFileName fn(refSourceFile);
-	wxString ext = fn.GetExt().Lower();
-	std::string refSourceFileStd = refSourceFile.ToUTF8().data();
+	ReferenceSource source;
+	source.file = MakeAbsoluteToProject(wxString::FromUTF8(step.refSourceFile)).ToUTF8().data();
+	source.set = step.refSet;
+	source.shape = step.refShape;
+	source.loadAll = step.refLoadAll;
+	source.mergeSliders = step.refMergeSliders;
+	source.mergeZaps = step.refMergeZaps;
+	source.appendNewSliders = step.refAppendNewSliders;
+	source.loadAddOns = step.refLoadAddOns;
 
-	int err = 0;
-	if (ext == "nif") {
-		err = project->LoadReferenceNif(refSourceFileStd, step.refShape, step.refMergeSliders, step.refMergeZaps);
-	}
-	else {
-		if (!step.refSet.empty()) {
-			err = project->LoadReference(refSourceFileStd, step.refSet, step.refShape, step.refMergeSliders, step.refMergeZaps, step.refAppendNewSliders);
-		}
-		else {
-			err = project->LoadReferenceTemplate(refSourceFileStd, step.refSet, step.refShape, step.refLoadAll, step.refMergeSliders, step.refMergeZaps, step.refAppendNewSliders);
-		}
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).LoadReference(source);
+	if (!result.ok) {
+		wxLogError("Automation: LoadReference - %s", result.error);
+		return 1;
 	}
 
-	if (err) {
-		wxLogError("Automation: LoadReference failed with error %d.", err);
-		return err;
-	}
-
-	project->SetTextures();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepAddProject(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepAddProject(const AutomationStep& step) {
 	if (step.refSourceFile.empty()) {
 		wxLogError("Automation: AddProject - no source file specified.");
 		return 1;
 	}
 
 	wxString refSourceFile = MakeAbsoluteToProject(wxString::FromUTF8(step.refSourceFile));
-	std::string refSourceFileStd = refSourceFile.ToUTF8().data();
 	wxLogMessage("Automation: Adding project from '%s' (set: '%s')...", refSourceFile, step.refSet);
-	int err = project->AddFromSliderSet(refSourceFileStd, step.refSet, false, step.refAppendNewSliders);
-	if (err) {
-		wxLogError("Automation: AddProject failed with error %d.", err);
-		return err;
+
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).AddProject(refSourceFile.ToUTF8().data(), step.refSet, step.refAppendNewSliders);
+	if (!result.ok) {
+		wxLogError("Automation: AddProject - %s", result.error);
+		return 1;
 	}
 
-	project->SetTextures();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetSliderValues(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetSliderValues(const AutomationStep& step) {
 	int intVal = static_cast<int>(step.setSliderValue * 100);
 	if (step.setSliderNames.empty()) {
 		wxLogMessage("Automation: Setting all slider values to %d%%...", intVal);
@@ -705,8 +853,8 @@ int AutomationDialog::ExecuteStepSetSliderValues(const AutomationStep& step) {
 	else {
 		for (const auto& name : step.setSliderNames) {
 			if (!project->ValidSlider(name)) {
-				wxLogError("Automation: SetSliderValues - slider '%s' not found.", name);
-				return 1;
+				wxLogWarning("Automation: SetSliderValues - slider '%s' not found, skipping.", name);
+				continue;
 			}
 			wxLogMessage("Automation: Setting slider '%s' to %d%%...", name, intVal);
 			outfitStudio->SetSliderValue(name, intVal);
@@ -716,7 +864,7 @@ int AutomationDialog::ExecuteStepSetSliderValues(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepConformSliders(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepConformSliders(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step, false);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: ConformSliders - no target shapes found.");
@@ -757,134 +905,53 @@ int AutomationDialog::ExecuteStepConformSliders(const AutomationStep& step) {
 					 options.sliderNames.size(), namesList);
 	}
 
-	outfitStudio->ZeroSliders();
-
-	project->InitConform();
-	for (auto* shape : shapes) {
-		wxLogMessage("Automation: Conforming '%s'...", shape->name.get());
-		Mesh* m = outfitStudio->glView->GetMesh(shape->name.get());
-		if (m)
-			project->morpher.CopyMeshMask(m, shape->name.get());
-		project->ConformShape(shape, options);
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).ConformSliders(shapes, options);
+	if (!result.ok) {
+		wxLogError("Automation: ConformSliders - %s", result.error);
+		return 1;
 	}
-	project->morpher.ClearProximityCache();
-	project->morpher.UnlinkRefDiffData();
+
+	outfitStudio->ApplyRefresh(result.refresh);
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepCopyBoneWeights(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepCopyBoneWeights(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step, false);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: CopyBoneWeights - no target shapes found.");
 		return 0;
 	}
 
-	if (!project->GetBaseShape()) {
-		wxLogError("Automation: CopyBoneWeights - no reference shape loaded.");
+	BoneWeightCopyOptions options;
+	options.proximityRadius = step.weightProximityRadius;
+	options.maxResults = step.weightMaxResults;
+	options.selectedBones = step.weightBoneList;
+	options.normalize = step.weightNormalize;
+
+	UndoStateProject usp;
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).CopyBoneWeights(shapes, options, usp);
+	if (!result.ok) {
+		wxLogError("Automation: CopyBoneWeights - %s", result.error);
 		return 1;
 	}
 
-	AnimInfo& workAnim = *project->GetWorkAnim();
-	std::vector<std::string> baseBones;
-	if (!step.weightBoneList.empty())
-		baseBones = step.weightBoneList;
-	else
-		baseBones = workAnim.shapeBones[project->GetBaseShape()->name.get()];
-
-	std::sort(baseBones.begin(), baseBones.end());
-
-	int nCopyBones = static_cast<int>(baseBones.size());
-	std::vector<std::string> lockedBones;
-	bool bSpreadWeight = false;
-
-	if (!step.weightBoneList.empty()) {
-		std::unordered_set<std::string> selectedBones(baseBones.begin(), baseBones.end());
-		std::vector<std::string> normalizeBones;
-		std::vector<std::string> nonNormalizeBones;
-		outfitStudio->GetNormalizeBones(&normalizeBones, &nonNormalizeBones);
-
-		for (const auto& bone : normalizeBones) {
-			if (!selectedBones.count(bone))
-				baseBones.push_back(bone);
-		}
-
-		bSpreadWeight = static_cast<int>(baseBones.size()) > nCopyBones;
-
-		if (bSpreadWeight) {
-			for (const auto& bone : nonNormalizeBones) {
-				if (!selectedBones.count(bone))
-					lockedBones.push_back(bone);
-			}
-		}
-		else {
-			for (const auto& bone : nonNormalizeBones) {
-				if (!selectedBones.count(bone))
-					baseBones.push_back(bone);
-			}
-		}
-	}
-
-	UndoStateProject usp;
-	usp.undoType = UndoType::Weight;
-
-	for (auto* shape : shapes) {
-		if (project->IsBaseShape(shape)) {
-			wxLogWarning("Automation: CopyBoneWeights - shape '%s' is the reference shape; skipping.", shape->name.get());
-			continue;
-		}
-
-		wxLogMessage("Automation: Copying bone weights to '%s'...", shape->name.get());
-
-		std::unordered_map<uint16_t, float> mask;
-		outfitStudio->glView->GetShapeMask(mask, shape->name.get());
-
-		usp.usss.resize(usp.usss.size() + 1);
-		UndoStateShape& uss = usp.usss.back();
-		uss.shapeName = shape->name.get();
-
-		std::vector<std::string> mergedBones = baseBones;
-
-		if (step.weightBoneList.empty()) {
-			auto& shapeBones = workAnim.shapeBones[shape->name.get()];
-			for (const auto& b : shapeBones) {
-				if (!std::binary_search(baseBones.begin(), baseBones.end(), b))
-					mergedBones.push_back(b);
-			}
-		}
-
-		project->CopyBoneWeights(shape,
-							 step.weightProximityRadius,
-							 step.weightMaxResults,
-							 mask,
-							 mergedBones,
-							 nCopyBones,
-							 lockedBones,
-							 uss,
-							 bSpreadWeight);
-	}
-
-	if (!usp.usss.empty())
-		outfitStudio->ActiveShapesUpdated(&usp, false);
-
-	project->morpher.ClearProximityCache();
-	workAnim.CleanupBones();
-	outfitStudio->UpdateAnimationGUI();
+	outfitStudio->ApplyRefresh(result.refresh);
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetBaseShape(const AutomationStep&) {
+int AutomationRunner::ExecuteStepSetBaseShape(const AutomationStep&) {
 	wxLogMessage("Automation: Setting base shape (baking slider values)...");
 	outfitStudio->SetBaseShape();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepClearReference(const AutomationStep&) {
+int AutomationRunner::ExecuteStepClearReference(const AutomationStep&) {
 	wxLogMessage("Automation: Clearing reference...");
 	project->DeleteShape(project->GetBaseShape());
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepTransformShape(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepTransformShape(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: TransformShape - no target shapes found.");
@@ -928,7 +995,7 @@ int AutomationDialog::ExecuteStepTransformShape(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepInvertUVs(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepInvertUVs(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: InvertUVs - no target shapes found.");
@@ -947,7 +1014,7 @@ int AutomationDialog::ExecuteStepInvertUVs(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepDeleteBones(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepDeleteBones(const AutomationStep& step) {
 	if (step.deleteBoneNames.empty()) {
 		wxLogError("Automation: DeleteBones - no bone names specified.");
 		return 1;
@@ -975,7 +1042,7 @@ int AutomationDialog::ExecuteStepDeleteBones(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepAddCustomBone(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepAddCustomBone(const AutomationStep& step) {
 	if (step.addBoneName.empty()) {
 		wxLogError("Automation: AddCustomBone - no bone name specified.");
 		return 1;
@@ -991,7 +1058,7 @@ int AutomationDialog::ExecuteStepAddCustomBone(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepEditBone(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepEditBone(const AutomationStep& step) {
 	if (step.editBoneName.empty()) {
 		wxLogError("Automation: EditBone - no bone name specified.");
 		return 1;
@@ -1017,7 +1084,7 @@ int AutomationDialog::ExecuteStepEditBone(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepRemoveSkinning(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepRemoveSkinning(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: RemoveSkinning - no target shapes found.");
@@ -1032,7 +1099,7 @@ int AutomationDialog::ExecuteStepRemoveSkinning(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepApplyPose(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepApplyPose(const AutomationStep& step) {
 	if (step.poseName.empty()) {
 		wxLogError("Automation: ApplyPose - no pose name specified.");
 		return 1;
@@ -1105,7 +1172,7 @@ int AutomationDialog::ExecuteStepApplyPose(const AutomationStep& step) {
 // RaceMenu body TRI files store their morphs per shape name, FaceGen head TRI files
 // store a mesh with morphs and no shape names, so those are matched by vertex count.
 // Returns the number of imported morphs or -1 if the file couldn't be read.
-int AutomationDialog::ImportSliderDataFromTRI(const AutomationStep& step, const std::string& filePath) {
+int AutomationRunner::ImportSliderDataFromTRI(const AutomationStep& step, const std::string& filePath) {
 	auto sliderSelected = [&step](const std::string& sliderName) {
 		if (step.sliderNames.empty())
 			return true;
@@ -1218,7 +1285,7 @@ int AutomationDialog::ImportSliderDataFromTRI(const AutomationStep& step, const 
 	return importCount;
 }
 
-int AutomationDialog::ExecuteStepImportSliderData(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepImportSliderData(const AutomationStep& step) {
 	if (step.sliderDataFile.empty()) {
 		wxLogError("Automation: ImportSliderData - no file/folder specified.");
 		return 1;
@@ -1476,7 +1543,7 @@ int AutomationDialog::ExecuteStepImportSliderData(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepImportFile(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepImportFile(const AutomationStep& step) {
 	if (step.importFilePath.empty()) {
 		wxLogError("Automation: ImportFile - no file/folder specified.");
 		return 1;
@@ -1506,13 +1573,13 @@ int AutomationDialog::ExecuteStepImportFile(const AutomationStep& step) {
 				if (ext == "nif")
 					err = project->ImportNIF(fullPath, false);
 				else if (ext == "obj")
-					err = project->ImportOBJ(fullPath);
+					err = ImportOBJFile(fullPath);
 				else if (ext == "tri")
 					// Only head TRI files carry a mesh, body TRI files are handled by the ImportSliderData step
 					err = project->ImportHeadTRI(fullPath, "", step.importTriSliders) ? 0 : 1;
 				else if (ext == "fbx")
 #ifdef USE_FBXSDK
-					err = project->ImportFBX(fullPath);
+					err = ImportFBXFile(fullPath);
 #else
 					wxLogError("Automation: FBX import is not available (FBX SDK not compiled in).");
 #endif
@@ -1536,13 +1603,13 @@ int AutomationDialog::ExecuteStepImportFile(const AutomationStep& step) {
 		if (ext == "nif")
 			err = project->ImportNIF(importFilePathStd, false);
 		else if (ext == "obj")
-			err = project->ImportOBJ(importFilePathStd);
+			err = ImportOBJFile(importFilePathStd);
 		else if (ext == "tri")
 			// Only head TRI files carry a mesh, body TRI files are handled by the ImportSliderData step
 			err = project->ImportHeadTRI(importFilePathStd, "", step.importTriSliders) ? 0 : 1;
 		else if (ext == "fbx")
 #ifdef USE_FBXSDK
-			err = project->ImportFBX(importFilePathStd);
+			err = ImportFBXFile(importFilePathStd);
 #else
 			wxLogError("Automation: FBX import is not available (FBX SDK not compiled in).");
 #endif
@@ -1559,7 +1626,57 @@ int AutomationDialog::ExecuteStepImportFile(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepDeleteShape(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepImportFromGame(const AutomationStep& step) {
+	if (step.gameImportFile.empty()) {
+		wxLogError("Automation: ImportFromGame - no file specified.");
+		return 1;
+	}
+
+	GameImport::Options options;
+	options.file = MakeAbsoluteToProject(wxString::FromUTF8(step.gameImportFile)).ToUTF8().data();
+	options.set = step.gameImportSet;
+	options.shapes = step.gameImportShapes;
+	options.skipShapes = step.gameImportSkipShapes;
+	if (!step.gameImportSliders.empty())
+		options.sliders = step.gameImportSliders;
+	for (auto& folder : step.gameImportDataFolders)
+		options.dataFolders.push_back(MakeAbsoluteToProject(wxString::FromUTF8(folder)).ToUTF8().data());
+
+	wxLogMessage("Automation: Importing '%s' from another game...", options.file);
+
+	GameImport::Report report;
+	OpResult result = GameImport::Import(*project, options, report);
+	if (!result.ok) {
+		wxLogError("Automation: ImportFromGame - %s", result.error);
+		return 1;
+	}
+
+	// Each material note once, they repeat for every shape with the same material
+	std::vector<std::string> notes;
+	for (auto& shape : report.shapes) {
+		const std::string name = shape["name"].get<std::string>();
+		wxLogMessage("Automation: ImportFromGame - imported '%s' from %s.", name, report.sourceGame);
+		if (shape.contains("warning"))
+			wxLogWarning("Automation: ImportFromGame - '%s': %s", name, shape["warning"].get<std::string>());
+
+		if (!shape.contains("material"))
+			continue;
+
+		const auto& material = shape["material"];
+		if (material.contains("error"))
+			wxLogWarning("Automation: ImportFromGame - '%s': %s", name, material["error"].get<std::string>());
+		if (material.contains("target") && material["target"].contains("notes"))
+			for (auto& note : material["target"]["notes"])
+				if (std::find(notes.begin(), notes.end(), note.get<std::string>()) == notes.end())
+					notes.push_back(note.get<std::string>());
+	}
+	for (auto& note : notes)
+		wxLogMessage("Automation: ImportFromGame - %s", note);
+
+	return 0;
+}
+
+int AutomationRunner::ExecuteStepDeleteShape(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: DeleteShape - no target shapes found.");
@@ -1573,7 +1690,7 @@ int AutomationDialog::ExecuteStepDeleteShape(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepRenameShape(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepRenameShape(const AutomationStep& step) {
 	if (step.renameOldName.empty() || step.renameNewName.empty()) {
 		wxLogError("Automation: RenameShape - old or new name not specified.");
 		return 1;
@@ -1581,9 +1698,23 @@ int AutomationDialog::ExecuteStepRenameShape(const AutomationStep& step) {
 
 	NiShape* shape = FindShapeByName(step.renameOldName);
 	if (!shape) {
+		if (step.renameSkipIfMissing) {
+			wxLogMessage("Automation: RenameShape - shape '%s' not found, skipping.", step.renameOldName);
+			return 0;
+		}
+
 		wxLogError("Automation: RenameShape - shape '%s' not found.", step.renameOldName);
 		return 1;
 	}
+
+	if (project->activeSet.IsAddOn()) {
+		wxLogError("Automation: RenameShape - the shapes of an add-on belong to its base project and can't be renamed.");
+		return 1;
+	}
+
+	size_t disconnected = project->RenameDisconnectsFromBase("", step.renameOldName).size();
+	if (disconnected > 0)
+		wxLogMessage("Automation: RenameShape - %zu slider data entries of shape '%s' are taken from the base project and become this project's own.", disconnected, step.renameOldName);
 
 	wxLogMessage("Automation: Renaming shape '%s' to '%s'...", step.renameOldName, step.renameNewName);
 	project->RenameShape(shape, step.renameNewName);
@@ -1591,40 +1722,32 @@ int AutomationDialog::ExecuteStepRenameShape(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSaveProject(const AutomationStep& step) {
-	if (step.saveSliderSetFile.empty() || step.saveOutputFileName.empty()) {
-		wxLogError("Automation: SaveProject - required fields not filled.");
-		return 1;
-	}
-
+int AutomationRunner::ExecuteStepSaveProject(const AutomationStep& step) {
 	wxLogMessage("Automation: Saving project '%s'...", step.saveName);
 
-	wxFileName sliderSetFile(wxString::FromUTF8(step.saveSliderSetFile));
-	wxString strOutfitName = wxString::FromUTF8(step.saveName);
-	wxString strDataDir = wxString::FromUTF8(step.saveShapeDataFolder);
-	wxString strBaseFile = wxString::FromUTF8(step.saveShapeDataFile);
-	wxString strGamePath = wxString::FromUTF8(step.saveOutputDataPath);
-	wxString strGameFile = wxString::FromUTF8(step.saveOutputFileName);
+	SaveProjectOptions options;
+	options.displayName = step.saveName;
+	options.sliderSetFile = step.saveSliderSetFile;
+	options.shapeDataFolder = step.saveShapeDataFolder;
+	options.shapeDataFile = step.saveShapeDataFile;
+	options.outputDataPath = step.saveOutputDataPath;
+	options.outputFileName = step.saveOutputFileName;
+	options.genWeights = step.saveGenWeights;
+	options.copyReference = step.saveAutoCopyRef;
+	options.sfMorphPath = step.saveSFMorphPath;
+	options.sfMorphTargetShape = step.saveSFMorphTargetShape;
 
-	wxString strSFMorphPath = wxString::FromUTF8(step.saveSFMorphPath);
-	wxString strSFMorphTargetShape = wxString::FromUTF8(step.saveSFMorphTargetShape);
-	if (!strSFMorphTargetShape.empty() && !FindShapeByName(step.saveSFMorphTargetShape))
-		wxLogWarning("Automation: SaveProject - Starfield morph target shape '%s' not found in the project.", strSFMorphTargetShape);
-
-	std::string result = project->Save(sliderSetFile, strOutfitName, strDataDir,
-									   strBaseFile, strGamePath, strGameFile,
-									   step.saveGenWeights, step.saveAutoCopyRef,
-									   project->bPreventMorphFile, project->bKeepZappedShapes,
-									   strSFMorphPath, strSFMorphTargetShape);
-
-	if (!result.empty()) {
-		wxLogError("Automation: SaveProject error: %s", result);
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).SaveProject(options);
+	if (!result.ok) {
+		wxLogError("Automation: SaveProject - %s", result.error);
 		return 1;
 	}
+
+	outfitStudio->SetPendingChanges(false);
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepExportFile(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepExportFile(const AutomationStep& step) {
 	if (step.exportFilePath.empty()) {
 		wxLogError("Automation: ExportFile - no file path specified.");
 		return 1;
@@ -1643,69 +1766,35 @@ int AutomationDialog::ExecuteStepExportFile(const AutomationStep& step) {
 		exportPath = fn.GetFullPath().ToUTF8().data();
 	}
 
-	wxFileName fn(wxString::FromUTF8(exportPath));
-	wxString ext = fn.GetExt().Lower();
-
 	wxLogMessage("Automation: Exporting to '%s'...", exportPath);
 
-	if (ext == "nif") {
-		std::vector<Mesh*> shapeMeshes;
-		for (auto* s : project->GetWorkNif()->GetShapes()) {
-			if (step.exportWithRef || !project->IsBaseShape(s)) {
-				Mesh* m = outfitStudio->glView->GetMesh(s->name.get());
-				if (m)
-					shapeMeshes.push_back(m);
-			}
-		}
-		int err = project->ExportNIF(exportPath, shapeMeshes, step.exportWithRef);
-		if (err) {
-			wxLogError("Automation: ExportNIF failed with error %d.", err);
-			return err;
-		}
-	}
-	else if (ext == "obj") {
-		auto shapes = project->GetWorkNif()->GetShapes();
-		int err = project->ExportOBJ(exportPath, shapes, false);
-		if (err) {
-			wxLogError("Automation: ExportOBJ failed with error %d.", err);
-			return err;
-		}
-	}
-	else if (ext == "fbx") {
-#ifdef USE_FBXSDK
-		auto shapes = project->GetWorkNif()->GetShapes();
-		int err = project->ExportFBX(exportPath, shapes, false);
-		if (err) {
-			wxLogError("Automation: ExportFBX failed with error %d.", err);
-			return err;
-		}
-#else
-		wxLogError("Automation: FBX export is not available (FBX SDK not compiled in).");
-		return 1;
-#endif
-	}
-	else if (ext == "osd") {
-		bool ok = project->SaveSliderData(exportPath);
-		if (!ok) {
-			wxLogError("Automation: SaveSliderData failed.");
+	// OBJ and FBX exports from automation have always written every shape, including the reference
+	ExportOptions options;
+	wxString ext = wxFileName(wxString::FromUTF8(exportPath)).GetExt().Lower();
+	options.withReference = step.exportWithRef || ext == "obj" || ext == "fbx";
+
+	// A head TRI file holds the morphs of a single shape. Without target meshes, that's the only non-reference shape.
+	if (ext == "tri" && step.exportHeadTri) {
+		auto shapes = ResolveTargetShapes(step, false);
+		if (shapes.size() != 1) {
+			wxLogError("Automation: ExportFile - a head TRI file needs exactly one target shape, found %zu. Specify the shape in Target Meshes.", shapes.size());
 			return 1;
 		}
+
+		options.headTri = true;
+		options.shapes.push_back(shapes.front()->name.get());
 	}
-	else if (ext == "tri") {
-		bool ok = project->WriteMorphTRI(exportPath);
-		if (!ok) {
-			wxLogError("Automation: WriteMorphTRI failed.");
-			return 1;
-		}
-	}
-	else {
-		wxLogError("Automation: ExportFile - unsupported file extension '%s'.", ext);
+
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).ExportFile(exportPath, options);
+	if (!result.ok) {
+		wxLogError("Automation: ExportFile - %s", result.error);
 		return 1;
 	}
+
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepExportSFMorphs(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepExportSFMorphs(const AutomationStep& step) {
 	if (step.exportSFMorphsFolder.empty()) {
 		wxLogError("Automation: ExportSFMorphs - no output folder specified.");
 		return 1;
@@ -1755,7 +1844,7 @@ int AutomationDialog::ExecuteStepExportSFMorphs(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepRefineMesh(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepRefineMesh(const AutomationStep& step) {
 	wxLogMessage("Automation: Refining meshes...");
 
 	auto workNif = project->GetWorkNif();
@@ -1820,7 +1909,7 @@ int AutomationDialog::ExecuteStepRefineMesh(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepDeleteSlider(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepDeleteSlider(const AutomationStep& step) {
 	if (step.deleteSliderNames.empty()) {
 		wxLogError("Automation: DeleteSlider - no slider name specified.");
 		return 1;
@@ -1857,7 +1946,7 @@ int AutomationDialog::ExecuteStepDeleteSlider(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetReferenceShape(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetReferenceShape(const AutomationStep& step) {
 	if (step.setRefUnset) {
 		wxLogMessage("Automation: Unsetting reference shape...");
 		project->SetBaseShape(nullptr);
@@ -1871,6 +1960,11 @@ int AutomationDialog::ExecuteStepSetReferenceShape(const AutomationStep& step) {
 
 	NiShape* shape = FindShapeByName(step.setRefShapeName);
 	if (!shape) {
+		if (step.setRefSkipIfMissing) {
+			wxLogMessage("Automation: SetReferenceShape - shape '%s' not found, skipping.", step.setRefShapeName);
+			return 0;
+		}
+
 		wxLogError("Automation: SetReferenceShape - shape '%s' not found.", step.setRefShapeName);
 		return 1;
 	}
@@ -1880,7 +1974,7 @@ int AutomationDialog::ExecuteStepSetReferenceShape(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepApplyTransforms(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepApplyTransforms(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: ApplyTransforms - no target shapes found.");
@@ -1905,13 +1999,13 @@ int AutomationDialog::ExecuteStepApplyTransforms(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepResetTransforms(const AutomationStep&) {
+int AutomationRunner::ExecuteStepResetTransforms(const AutomationStep&) {
 	wxLogMessage("Automation: Resetting transforms...");
 	project->ResetTransforms();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepDuplicateShape(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepDuplicateShape(const AutomationStep& step) {
 	if (step.dupNewName.empty()) {
 		wxLogError("Automation: DuplicateShape - no new name specified.");
 		return 1;
@@ -1940,16 +2034,16 @@ int AutomationDialog::ExecuteStepDuplicateShape(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepChangePartitions(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepChangePartitions(const AutomationStep& step) {
 	int sourcePartitionID = 0;
 	int destinationPartitionID = 0;
 	if (!ParseAutomationPartitionID(step.partitionSource, sourcePartitionID)) {
-		wxLogError("Automation: ChangePartitions - invalid source partition '%s'.", step.partitionSource);
+		wxLogError("Automation: ChangePartitions - invalid source partition '%s', expected a slot number like '32' or '32 Body'.", step.partitionSource);
 		return 1;
 	}
 
 	if (!ParseAutomationPartitionID(step.partitionDestination, destinationPartitionID)) {
-		wxLogError("Automation: ChangePartitions - invalid destination partition '%s'.", step.partitionDestination);
+		wxLogError("Automation: ChangePartitions - invalid destination partition '%s', expected a slot number like '52' or '52 Pelvis'.", step.partitionDestination);
 		return 1;
 	}
 
@@ -2065,7 +2159,7 @@ int AutomationDialog::ExecuteStepChangePartitions(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMirrorShape(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMirrorShape(const AutomationStep& step) {
 	if (!step.mirrorX && !step.mirrorY && !step.mirrorZ) {
 		wxLogWarning("Automation: MirrorShape - no mirror axis selected.");
 		return 0;
@@ -2087,7 +2181,7 @@ int AutomationDialog::ExecuteStepMirrorShape(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepRecalcNormals(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepRecalcNormals(const AutomationStep& step) {
 	auto* workNif = project->GetWorkNif();
 	if (!workNif) {
 		wxLogError("Automation: RecalcNormals - no work NIF loaded.");
@@ -2143,7 +2237,7 @@ int AutomationDialog::ExecuteStepRecalcNormals(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepClearMask(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepClearMask(const AutomationStep& step) {
 	auto targetShapes = ResolveTargetShapes(step);
 	if (targetShapes.empty()) {
 		wxLogWarning("Automation: ClearMask - no target shapes found.");
@@ -2164,7 +2258,7 @@ int AutomationDialog::ExecuteStepClearMask(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepLoadMask(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepLoadMask(const AutomationStep& step) {
 	if (step.loadMaskFile.empty()) {
 		wxLogError("Automation: LoadMask - no mask file specified.");
 		return 1;
@@ -2220,7 +2314,7 @@ int AutomationDialog::ExecuteStepLoadMask(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetSliderProperties(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetSliderProperties(const AutomationStep& step) {
 	wxLogMessage("Automation: Setting slider properties...");
 
 	for (size_t i = 0; i < project->SliderCount(); i++) {
@@ -2260,7 +2354,7 @@ int AutomationDialog::ExecuteStepSetSliderProperties(const AutomationStep& step)
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetShaderProperties(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetShaderProperties(const AutomationStep& step) {
 	if (step.shaderProperties.empty()) {
 		wxLogWarning("Automation: SetShaderProperties - no shader properties configured.");
 		return 0;
@@ -2322,7 +2416,7 @@ int AutomationDialog::ExecuteStepSetShaderProperties(const AutomationStep& step)
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetGeometryProperties(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetGeometryProperties(const AutomationStep& step) {
 	if (step.geometryProperties.empty()) {
 		wxLogWarning("Automation: SetGeometryProperties - no geometry properties configured.");
 		return 0;
@@ -2391,7 +2485,7 @@ int AutomationDialog::ExecuteStepSetGeometryProperties(const AutomationStep& ste
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetExtraData(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetExtraData(const AutomationStep& step) {
 	NifFile* nif = project->GetWorkNif();
 	if (!nif)
 		return 0;
@@ -2512,7 +2606,7 @@ int AutomationDialog::ExecuteStepSetExtraData(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepDeleteExtraData(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepDeleteExtraData(const AutomationStep& step) {
 	NifFile* nif = project->GetWorkNif();
 	if (!nif)
 		return 0;
@@ -2581,7 +2675,7 @@ int AutomationDialog::ExecuteStepDeleteExtraData(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetTexturePaths(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetTexturePaths(const AutomationStep& step) {
 	if (step.texturePaths.empty()) {
 		wxLogWarning("Automation: SetTexturePaths - no texture paths configured.");
 		return 0;
@@ -2593,13 +2687,13 @@ int AutomationDialog::ExecuteStepSetTexturePaths(const AutomationStep& step) {
 
 	std::vector<AutomationStep::TexturePath> texturePaths;
 	for (const auto& path : step.texturePaths) {
-		int index = ResolveTexturePathIndex(path);
+		int index = ResolveAutomationTexturePathIndex(path);
 		if (index < 0) {
 			wxLogWarning("Automation: SetTexturePaths - texture slot '%s' could not be resolved; skipping.", path.name.c_str());
 			continue;
 		}
 
-		int namedIndex = path.name.empty() ? -1 : TexturePathIndexForName(path.name);
+		int namedIndex = path.name.empty() ? -1 : AutomationTexturePathIndexForName(path.name);
 		if (path.index >= 0 && namedIndex >= 0 && namedIndex != path.index) {
 			wxLogWarning("Automation: SetTexturePaths - slot name '%s' points to %d but index %d was specified; using index %d.",
 				path.name.c_str(),
@@ -2611,7 +2705,7 @@ int AutomationDialog::ExecuteStepSetTexturePaths(const AutomationStep& step) {
 		AutomationStep::TexturePath resolvedPath = path;
 		resolvedPath.index = index;
 		if (resolvedPath.name.empty())
-			resolvedPath.name = TexturePathNameForIndex(index);
+			resolvedPath.name = AutomationTexturePathNameForIndex(index);
 		texturePaths.push_back(std::move(resolvedPath));
 	}
 
@@ -2687,7 +2781,7 @@ int AutomationDialog::ExecuteStepSetTexturePaths(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepRemoveUnusedNodes(const AutomationStep&) {
+int AutomationRunner::ExecuteStepRemoveUnusedNodes(const AutomationStep&) {
 	wxLogMessage("Automation: Removing unused nodes...");
 	int deletionCount = 0;
 	auto workNif = project->GetWorkNif();
@@ -2697,153 +2791,36 @@ int AutomationDialog::ExecuteStepRemoveUnusedNodes(const AutomationStep&) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepFixClipping(const AutomationStep& step) {
-	nifly::NiShape* refShape = project->GetBaseShape();
-	if (!refShape) {
-		wxLogError("Automation: FixClipping - no reference shape set.");
-		return 1;
-	}
-
-	ClippingFixOptions options;
-	options.strength = std::max(0.0f, std::min(1.0f, step.fixClipStrength));
-	if (options.strength <= 0.0f) {
-		wxLogWarning("Automation: FixClipping - strength is 0, nothing to do.");
-		return 0;
-	}
-
+int AutomationRunner::ExecuteStepFixClipping(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: FixClipping - no target shapes found.");
 		return 0;
 	}
 
-	if (step.fixClipMode == 0) {
-		// Shapes mode: fix base geometry of target shapes with no sliders applied
-		wxLogMessage("Automation: FixClipping (Shapes mode, strength=%.0f%%)...", step.fixClipStrength * 100.0f);
+	ClippingFixMode mode = step.fixClipMode == 1 ? ClippingFixMode::Sliders : ClippingFixMode::Shapes;
+	wxLogMessage("Automation: FixClipping (%s mode, strength=%.0f%%)...", mode == ClippingFixMode::Sliders ? "Sliders" : "Shapes", step.fixClipStrength * 100.0f);
 
-		std::vector<nifly::Vector3> bodyVerts;
-		std::vector<nifly::Triangle> bodyTris;
-		project->GetWorkNif()->GetVertsForShape(refShape, bodyVerts);
-		refShape->GetTriangles(bodyTris);
-
-		for (auto* shape : shapes) {
-			if (project->IsBaseShape(shape))
-				continue;
-
-			if (!ClippingFixer::IsEligibleForFix(*project->GetWorkNif(), shape))
-				continue;
-
-			std::vector<nifly::Vector3> outfitVerts;
-			project->GetWorkNif()->GetVertsForShape(shape, outfitVerts);
-
-			std::vector<nifly::Triangle> outfitTris;
-			shape->GetTriangles(outfitTris);
-
-			std::vector<nifly::Vector3> fixedVerts = outfitVerts;
-			ClippingFixer::FixClipping(bodyVerts, bodyTris, fixedVerts, outfitTris, options);
-
-			bool changed = false;
-			for (size_t i = 0; i < outfitVerts.size(); i++) {
-				nifly::Vector3 diff = fixedVerts[i] - outfitVerts[i];
-				if (!diff.IsZero(true)) {
-					changed = true;
-					break;
-				}
-			}
-
-			if (changed) {
-				wxLogMessage("Automation: FixClipping - fixed base geometry for '%s'.", shape->name.get());
-				project->GetWorkNif()->SetVertsForShape(shape, fixedVerts);
-			}
-		}
-
-		outfitStudio->ApplySliders();
-	}
-	else if (step.fixClipMode == 1) {
-		// Sliders mode: fix clipping for each slider individually
-		wxLogMessage("Automation: FixClipping (Sliders mode, strength=%.0f%%)...", step.fixClipStrength * 100.0f);
-
-		// Build list of sliders to process
-		std::vector<size_t> sliderIndices;
-		if (step.fixClipSliderNames.empty()) {
-			// Process all non-zap/non-UV sliders that have morph data
-			for (size_t i = 0; i < project->SliderCount(); i++) {
-				if (project->activeSet[i].bZap || project->activeSet[i].bUV)
-					continue;
-				sliderIndices.push_back(i);
-			}
-			wxLogMessage("Automation: FixClipping - processing all %zu non-zap/non-UV sliders.", sliderIndices.size());
-		}
-		else {
-			for (const auto& name : step.fixClipSliderNames) {
-				size_t idx;
-				if (!project->SliderIndexFromName(name, idx)) {
-					wxLogError("Automation: FixClipping - slider '%s' not found.", name);
-					return 1;
-				}
-				sliderIndices.push_back(idx);
-			}
-		}
-
-		if (sliderIndices.empty()) {
-			wxLogWarning("Automation: FixClipping - no sliders to process.");
-			return 0;
-		}
-
-		// Save current slider values
-		std::vector<float> savedValues(project->SliderCount());
-		for (size_t i = 0; i < project->SliderCount(); i++)
-			savedValues[i] = project->SliderValue(i);
-
-		for (size_t si : sliderIndices) {
-			std::string sliderName = project->GetSliderName(si);
-			wxLogMessage("Automation: FixClipping - processing slider '%s'...", sliderName);
-
-			// Set all sliders to 0%, then this slider to 100%
-			for (size_t i = 0; i < project->SliderCount(); i++)
-				outfitStudio->SetSliderValue(i, 0);
-			outfitStudio->SetSliderValue(si, 100);
-			outfitStudio->ApplySliders();
-
-			for (auto* shape : shapes) {
-				if (project->IsBaseShape(shape))
-					continue;
-
-				// Check if this shape has morph data for this slider
-				TargetDataDiffs* diffSet = project->GetDiffSet(project->activeSet[si], shape);
-				if (!diffSet || diffSet->empty())
-					continue;
-
-				TargetDataDiffs morphDiffs;
-				project->CalcSliderClippingCorrection(shape, sliderName, options.strength, morphDiffs);
-
-				if (!morphDiffs.empty()) {
-					wxLogMessage("Automation: FixClipping - updated %zu vertices for '%s' slider '%s'.",
-								 morphDiffs.size(), shape->name.get(), sliderName);
-					project->UpdateMorphResult(shape, sliderName, morphDiffs);
-				}
-			}
-		}
-
-		// Restore original slider values
-		for (size_t i = 0; i < project->SliderCount(); i++)
-			outfitStudio->SetSliderValue(i, static_cast<int>(savedValues[i] * 100));
-		outfitStudio->ApplySliders();
+	OpResult result = ProjectOperations(*project, outfitStudio->editor).FixClipping(shapes, mode, step.fixClipStrength, step.fixClipSliderNames);
+	if (!result.ok) {
+		wxLogError("Automation: FixClipping - %s", result.error);
+		return 1;
 	}
 
+	outfitStudio->ApplyRefresh(result.refresh);
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepFixBadBones(const AutomationStep& WXUNUSED(step)) {
+int AutomationRunner::ExecuteStepFixBadBones(const AutomationStep& WXUNUSED(step)) {
 	wxLogMessage("Automation: Fixing bad bones...");
 
-	if (!project->CheckForBadBones(false))
+	if (!project->CheckForBadBones())
 		wxLogMessage("Automation: No bad bones found.");
 
 	return 0;
 }
 
-void AutomationDialog::RefreshMeshesWithMasks(std::unordered_map<std::string, std::vector<float>>& maskStash) {
+void AutomationRunner::RefreshMeshesWithMasks(std::unordered_map<std::string, std::vector<float>>& maskStash) {
 	// The stashed masks were already remapped to the new vertex lists by
 	// ApplyShapeMeshUndo while the render meshes still carry the old ones, so the
 	// rebuild has to happen without stashing again.
@@ -2851,7 +2828,7 @@ void AutomationDialog::RefreshMeshesWithMasks(std::unordered_map<std::string, st
 	outfitStudio->glView->UnstashMasks(maskStash);
 }
 
-int AutomationDialog::ExecuteStepAddBone(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepAddBone(const AutomationStep& step) {
 	if (step.addBoneRefNames.empty()) {
 		wxLogError("Automation: AddBone - no bone name specified.");
 		return 1;
@@ -2875,7 +2852,7 @@ int AutomationDialog::ExecuteStepAddBone(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepTransferWeights(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepTransferWeights(const AutomationStep& step) {
 	auto* baseShape = project->GetBaseShape();
 	if (!baseShape) {
 		wxLogError("Automation: TransferWeights - there is no reference shape.");
@@ -2916,7 +2893,7 @@ int AutomationDialog::ExecuteStepTransferWeights(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetBoneTransform(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetBoneTransform(const AutomationStep& step) {
 	if (step.boneXformNames.empty()) {
 		wxLogError("Automation: SetBoneTransform - no bone name specified.");
 		return 1;
@@ -2952,7 +2929,7 @@ int AutomationDialog::ExecuteStepSetBoneTransform(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMakeConversionRef(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMakeConversionRef(const AutomationStep& step) {
 	if (step.convRefSliderName.empty()) {
 		wxLogError("Automation: MakeConversionRef - no slider name specified.");
 		return 1;
@@ -2997,7 +2974,7 @@ int AutomationDialog::ExecuteStepMakeConversionRef(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepCopySegPart(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepCopySegPart(const AutomationStep& step) {
 	if (!project->GetBaseShape()) {
 		wxLogError("Automation: CopySegPart - there is no reference shape.");
 		return 1;
@@ -3024,7 +3001,7 @@ int AutomationDialog::ExecuteStepCopySegPart(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepDeleteVertices(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepDeleteVertices(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: DeleteVertices - no target shapes found.");
@@ -3097,7 +3074,7 @@ int AutomationDialog::ExecuteStepDeleteVertices(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSeparateVertices(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSeparateVertices(const AutomationStep& step) {
 	if (step.separateNewName.empty()) {
 		wxLogError("Automation: SeparateVertices - no name for the new shape specified.");
 		return 1;
@@ -3162,7 +3139,7 @@ int AutomationDialog::ExecuteStepSeparateVertices(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMergeGeometry(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMergeGeometry(const AutomationStep& step) {
 	if (step.mergeSourceShape.empty() || step.mergeTargetShape.empty()) {
 		wxLogError("Automation: MergeGeometry - both a source and a target shape are required.");
 		return 1;
@@ -3170,12 +3147,22 @@ int AutomationDialog::ExecuteStepMergeGeometry(const AutomationStep& step) {
 
 	NiShape* sourceShape = FindShapeByName(step.mergeSourceShape);
 	if (!sourceShape) {
+		if (step.mergeSkipIfMissing) {
+			wxLogMessage("Automation: MergeGeometry - source shape '%s' not found, skipping.", step.mergeSourceShape);
+			return 0;
+		}
+
 		wxLogError("Automation: MergeGeometry - source shape '%s' not found.", step.mergeSourceShape);
 		return 1;
 	}
 
 	NiShape* targetShape = FindShapeByName(step.mergeTargetShape);
 	if (!targetShape) {
+		if (step.mergeSkipIfMissing) {
+			wxLogMessage("Automation: MergeGeometry - target shape '%s' not found, skipping.", step.mergeTargetShape);
+			return 0;
+		}
+
 		wxLogError("Automation: MergeGeometry - target shape '%s' not found.", step.mergeTargetShape);
 		return 1;
 	}
@@ -3230,7 +3217,7 @@ int AutomationDialog::ExecuteStepMergeGeometry(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSymmetrizeVertices(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSymmetrizeVertices(const AutomationStep& step) {
 	if (!step.asymDoPositions && !step.asymDoUnmatched && !step.asymDoSliders && !step.asymDoBones) {
 		wxLogWarning("Automation: SymmetrizeVertices - nothing selected to symmetrize.");
 		return 0;
@@ -3291,7 +3278,74 @@ int AutomationDialog::ExecuteStepSymmetrizeVertices(const AutomationStep& step) 
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepClearSliderData(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSmoothVertices(const AutomationStep& step) {
+	auto shapes = ResolveTargetShapes(step);
+	if (shapes.empty()) {
+		wxLogWarning("Automation: SmoothVertices - no target shapes found.");
+		return 0;
+	}
+
+	std::vector<Mesh*> meshes;
+	for (auto* shape : shapes)
+		if (Mesh* m = outfitStudio->glView->GetMesh(shape->name.get()))
+			meshes.push_back(m);
+	if (meshes.empty()) {
+		wxLogWarning("Automation: SmoothVertices - none of the target shapes have a mesh to work on.");
+		return 0;
+	}
+
+	// Shapes lying on the smoothed ones, by name or by pattern like the target shapes
+	std::vector<Mesh*> followers;
+	auto addFollower = [&](NiShape* shape) {
+		Mesh* m = shape ? outfitStudio->glView->GetMesh(shape->name.get()) : nullptr;
+		if (m && std::find(meshes.begin(), meshes.end(), m) == meshes.end() && std::find(followers.begin(), followers.end(), m) == followers.end())
+			followers.push_back(m);
+	};
+	for (const auto& name : step.smoothFollowShapes) {
+		if (step.targetRegex) {
+			try {
+				std::regex re(name, std::regex::icase);
+				for (auto* shape : project->GetWorkNif()->GetShapes())
+					if (std::regex_search(shape->name.get(), re))
+						addFollower(shape);
+			}
+			catch (const std::regex_error& e) {
+				wxLogWarning("Automation: SmoothVertices - invalid follow shape regex '%s' (%s).", name, e.what());
+			}
+		}
+		else
+			addFollower(FindShapeByName(name));
+	}
+
+	wxLogMessage("Automation: Smoothing %zu shape(s) %d time(s) at strength %.3f, %zu shape(s) following...", meshes.size(), step.smoothIterations,
+				 step.smoothStrength, followers.size());
+
+	BrushStrokeController controller(*project, outfitStudio->editor);
+	RefreshFlags refresh = controller.SmoothMeshes(meshes, step.smoothIterations, step.smoothStrength, step.smoothKeepBorders);
+	outfitStudio->ApplyRefresh(refresh);
+
+	if (!followers.empty()) {
+		UndoHistory* history = outfitStudio->glView->GetUndoHistory();
+		auto moves = BrushStrokeController::FollowEdit(*history->GetCurState(), meshes, followers, Mesh::TransformDistNifToMesh(step.smoothFollowRadius));
+		if (!moves.empty()) {
+			UndoStateProject* usp = history->PushState();
+			usp->undoType = UndoType::VertexPosition;
+			usp->usss = std::move(moves);
+			if (outfitStudio->editor.bEditSlider) {
+				usp->sliderName = outfitStudio->editor.activeSlider;
+				float sliderscale = project->SliderValue(usp->sliderName);
+				usp->sliderscale = sliderscale == 0.0f ? 1.0f : sliderscale;
+			}
+			outfitStudio->glView->ApplyUndoState(usp, false);
+		}
+	}
+
+	outfitStudio->SetPendingChanges();
+	outfitStudio->glView->Render();
+	return 0;
+}
+
+int AutomationRunner::ExecuteStepClearSliderData(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: ClearSliderData - no target shapes found.");
@@ -3333,7 +3387,7 @@ int AutomationDialog::ExecuteStepClearSliderData(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepCloneSlider(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepCloneSlider(const AutomationStep& step) {
 	if (step.cloneSliderSource.empty() || step.newSliderName.empty()) {
 		wxLogError("Automation: CloneSlider - both a source slider and a new name are required.");
 		return 1;
@@ -3355,7 +3409,7 @@ int AutomationDialog::ExecuteStepCloneSlider(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepNegateSlider(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepNegateSlider(const AutomationStep& step) {
 	if (step.negateSliderNames.empty()) {
 		wxLogError("Automation: NegateSlider - no slider name specified.");
 		return 1;
@@ -3383,7 +3437,7 @@ int AutomationDialog::ExecuteStepNegateSlider(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepNewCombinedSlider(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepNewCombinedSlider(const AutomationStep& step) {
 	if (step.newSliderName.empty()) {
 		wxLogError("Automation: NewCombinedSlider - no slider name specified.");
 		return 1;
@@ -3400,7 +3454,7 @@ int AutomationDialog::ExecuteStepNewCombinedSlider(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepNewZapSlider(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepNewZapSlider(const AutomationStep& step) {
 	if (step.newSliderName.empty()) {
 		wxLogError("Automation: NewZapSlider - no slider name specified.");
 		return 1;
@@ -3436,7 +3490,7 @@ int AutomationDialog::ExecuteStepNewZapSlider(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepGrowShrinkMask(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepGrowShrinkMask(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: GrowShrinkMask - no target shapes found.");
@@ -3445,37 +3499,6 @@ int AutomationDialog::ExecuteStepGrowShrinkMask(const AutomationStep& step) {
 
 	const bool grow = step.maskGrowShrinkMode == 0;
 	const int iterations = std::max(1, step.maskGrowShrinkCount);
-
-	// One pass of the same two stage logic the menu items use: welded vertices of
-	// the border first, and only when there are none of those the adjacent ring.
-	auto stepMask = [grow](Mesh* m) {
-		const float to = grow ? 1.0f : 0.0f;
-
-		std::vector<int> changed;
-		for (int i = 0; i < m->nVerts; i++) {
-			if (grow ? m->mask[i] == 0.0f : m->mask[i] > 0.0f)
-				continue;
-
-			m->DoForEachWeldedVertex(i, [&](int wvi) {
-				if (m->mask[wvi] != to)
-					changed.push_back(wvi);
-			});
-		}
-
-		if (changed.empty()) {
-			std::unordered_set<int> adjacentPoints;
-			for (int i = 0; i < m->nVerts; i++)
-				if (grow ? m->mask[i] > 0.0f : m->mask[i] == 0.0f)
-					m->GetAdjacentPoints(i, adjacentPoints);
-
-			for (int adj : adjacentPoints)
-				if (m->mask[adj] != to)
-					changed.push_back(adj);
-		}
-
-		for (int vi : changed)
-			m->mask[vi] = to;
-	};
 
 	for (auto* shape : shapes) {
 		std::string shapeName = shape->name.get();
@@ -3486,16 +3509,153 @@ int AutomationDialog::ExecuteStepGrowShrinkMask(const AutomationStep& step) {
 		wxLogMessage("Automation: %s the mask of '%s' %d time(s)...", grow ? "Growing" : "Shrinking", shapeName, iterations);
 
 		for (int i = 0; i < iterations; i++)
-			stepMask(m);
-
-		m->QueueUpdate(Mesh::UpdateType::Mask);
+			MaskOps::ApplyChanges(*m, MaskOps::GrowShrinkChanges(*m, grow));
 	}
 
 	outfitStudio->glView->Render();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepInvertMask(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMaskBox(const AutomationStep& step) {
+	auto shapes = ResolveTargetShapes(step);
+	if (shapes.empty()) {
+		wxLogWarning("Automation: MaskBox - no target shapes found.");
+		return 0;
+	}
+
+	const Vector3 lo(step.maskBoxMinX, step.maskBoxMinY, step.maskBoxMinZ);
+	const Vector3 hi(step.maskBoxMaxX, step.maskBoxMaxY, step.maskBoxMaxZ);
+
+	for (auto* shape : shapes) {
+		std::string shapeName = shape->name.get();
+		Mesh* m = outfitStudio->glView->GetMesh(shapeName);
+		if (!m || !m->mask)
+			continue;
+
+		// Positions as the shape is shown now, in NIF units
+		std::vector<Vector3> verts;
+		project->GetLiveVerts(shape, verts);
+
+		std::unordered_map<int, float> changes;
+		for (int v = 0; v < m->nVerts && v < static_cast<int>(verts.size()); v++) {
+			const Vector3& p = verts[v];
+			const bool inside = p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y && p.z >= lo.z && p.z <= hi.z;
+			if (inside)
+				changes[v] = 1.0f;
+			else if (!step.maskBoxKeepOthers)
+				changes[v] = 0.0f;
+		}
+
+		wxLogMessage("Automation: Masking the vertices of '%s' inside the box...", shapeName);
+		MaskOps::ApplyChanges(*m, changes);
+	}
+
+	outfitStudio->glView->Render();
+	return 0;
+}
+
+int AutomationRunner::ExecuteStepMaskCovered(const AutomationStep& step) {
+	// Without target meshes, the body under the outfit
+	std::vector<NiShape*> shapes;
+	if (step.targetMeshes.empty()) {
+		if (NiShape* baseShape = project->GetBaseShape())
+			shapes.push_back(baseShape);
+	}
+	else
+		shapes = ResolveTargetShapes(step, true);
+	if (shapes.empty()) {
+		wxLogWarning("Automation: MaskCovered - no target shapes found.");
+		return 0;
+	}
+
+	std::vector<NiShape*> covers;
+	if (step.maskCoverShapes.empty()) {
+		for (auto* shape : project->GetWorkNif()->GetShapes())
+			if (!project->IsBaseShape(shape) && std::find(shapes.begin(), shapes.end(), shape) == shapes.end())
+				covers.push_back(shape);
+	}
+	else {
+		for (auto& name : step.maskCoverShapes) {
+			NiShape* shape = FindShapeByName(name);
+			if (!shape) {
+				wxLogWarning("Automation: MaskCovered - cover shape '%s' not found, skipping.", name);
+				continue;
+			}
+			covers.push_back(shape);
+		}
+	}
+	if (covers.empty()) {
+		wxLogWarning("Automation: MaskCovered - no cover shapes found.");
+		return 0;
+	}
+
+	// The cover shapes as they are shown now
+	std::vector<std::vector<Vector3>> coverVerts(covers.size());
+	std::vector<std::vector<Triangle>> coverTris(covers.size());
+	for (size_t c = 0; c < covers.size(); c++) {
+		project->GetLiveVerts(covers[c], coverVerts[c]);
+		covers[c]->GetTriangles(coverTris[c]);
+	}
+
+	for (auto* shape : shapes) {
+		std::string shapeName = shape->name.get();
+		Mesh* m = outfitStudio->glView->GetMesh(shapeName);
+		if (!m || !m->mask)
+			continue;
+
+		std::vector<Vector3> verts;
+		project->GetLiveVerts(shape, verts);
+		std::vector<Triangle> tris;
+		shape->GetTriangles(tris);
+		// Covered by any of them
+		std::vector<bool> covered(verts.size(), false);
+		for (size_t c = 0; c < covers.size(); c++) {
+			std::vector<bool> byCover = MeshAnalysis::CoveredVertices(verts, tris, coverVerts[c], coverTris[c], step.maskCoverOutside, step.maskCoverInside);
+			for (size_t v = 0; v < covered.size() && v < byCover.size(); v++)
+				if (byCover[v])
+					covered[v] = true;
+		}
+
+		std::unordered_map<int, float> changes;
+		size_t count = 0;
+		for (int v = 0; v < m->nVerts && v < static_cast<int>(covered.size()); v++) {
+			changes[v] = covered[v] ? 1.0f : 0.0f;
+			if (covered[v])
+				count++;
+		}
+
+		wxLogMessage("Automation: Masked %zu covered vertices of '%s'.", count, shapeName);
+		MaskOps::ApplyChanges(*m, changes);
+	}
+
+	outfitStudio->glView->Render();
+	return 0;
+}
+
+int AutomationRunner::ExecuteStepSmoothMask(const AutomationStep& step) {
+	auto shapes = ResolveTargetShapes(step);
+	if (shapes.empty()) {
+		wxLogWarning("Automation: SmoothMask - no target shapes found.");
+		return 0;
+	}
+
+	const int iterations = std::max(1, step.maskSmoothCount);
+	for (auto* shape : shapes) {
+		std::string shapeName = shape->name.get();
+		Mesh* m = outfitStudio->glView->GetMesh(shapeName);
+		if (!m || !m->mask)
+			continue;
+
+		wxLogMessage("Automation: Smoothing the mask of '%s' %d time(s)...", shapeName, iterations);
+		for (int i = 0; i < iterations; i++)
+			MaskOps::ApplyChanges(*m, MaskOps::SmoothChanges(*m));
+	}
+
+	outfitStudio->glView->Render();
+	return 0;
+}
+
+int AutomationRunner::ExecuteStepInvertMask(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: InvertMask - no target shapes found.");
@@ -3509,17 +3669,14 @@ int AutomationDialog::ExecuteStepInvertMask(const AutomationStep& step) {
 			continue;
 
 		wxLogMessage("Automation: Inverting the mask of '%s'...", shapeName);
-		for (int i = 0; i < m->nVerts; i++)
-			m->mask[i] = 1.0f - m->mask[i];
-
-		m->QueueUpdate(Mesh::UpdateType::Mask);
+		MaskOps::ApplyChanges(*m, MaskOps::InvertChanges(*m));
 	}
 
 	outfitStudio->glView->Render();
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMaskWeighted(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMaskWeighted(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: MaskWeighted - no target shapes found.");
@@ -3562,7 +3719,7 @@ int AutomationDialog::ExecuteStepMaskWeighted(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMaskBoneWeighted(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMaskBoneWeighted(const AutomationStep& step) {
 	if (step.maskBoneNames.empty()) {
 		wxLogError("Automation: MaskBoneWeighted - no bone name specified.");
 		return 1;
@@ -3606,7 +3763,7 @@ int AutomationDialog::ExecuteStepMaskBoneWeighted(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMaskSliderAffected(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMaskSliderAffected(const AutomationStep& step) {
 	if (step.maskSliderName.empty()) {
 		wxLogError("Automation: MaskSliderAffected - no slider name specified.");
 		return 1;
@@ -3632,7 +3789,7 @@ int AutomationDialog::ExecuteStepMaskSliderAffected(const AutomationStep& step) 
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepMaskAsymmetric(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepMaskAsymmetric(const AutomationStep& step) {
 	auto shapes = ResolveTargetShapes(step);
 	if (shapes.empty()) {
 		wxLogWarning("Automation: MaskAsymmetric - no target shapes found.");
@@ -3700,7 +3857,7 @@ int AutomationDialog::ExecuteStepMaskAsymmetric(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSaveMask(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSaveMask(const AutomationStep& step) {
 	if (step.saveMaskFile.empty()) {
 		wxLogError("Automation: SaveMask - no mask file specified.");
 		return 1;
@@ -3773,7 +3930,7 @@ int AutomationDialog::ExecuteStepSaveMask(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepSetVariable(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepSetVariable(const AutomationStep& step) {
 	if (step.variableName.empty()) {
 		wxLogError("Automation: SetVariable - no variable name specified.");
 		return 1;
@@ -3789,7 +3946,7 @@ int AutomationDialog::ExecuteStepSetVariable(const AutomationStep& step) {
 	return 0;
 }
 
-int AutomationDialog::ExecuteStepLogMessage(const AutomationStep& step) {
+int AutomationRunner::ExecuteStepLogMessage(const AutomationStep& step) {
 	wxString message = wxString::FromUTF8(step.logMessageText);
 
 	switch (step.logMessageLevel) {
@@ -3797,14 +3954,6 @@ int AutomationDialog::ExecuteStepLogMessage(const AutomationStep& step) {
 		case 1: wxLogWarning("%s", message); break;
 		default: wxLogMessage("%s", message); break;
 	}
-
-	return 0;
-}
-
-int AutomationDialog::ExecuteStep(const AutomationStep& step) {
-	const StepBinding* binding = FindStepBinding(step.type);
-	if (binding && binding->execute)
-		return (this->*binding->execute)(step);
 
 	return 0;
 }

@@ -251,7 +251,7 @@ void main(void)
 					// Model Space Normal Map
 					normal = normalize(normalMap.rgb * 2.0 - 1.0);
 					normal.r = -normal.r;
-					normal = mat3(matView) * normal;
+					normal = mv_tbn * normal;
 					normal = normalize(normal);
 
 					if (bSpecular)
@@ -261,8 +261,12 @@ void main(void)
 				}
 				else
 				{
-					// Tangent Space Normal Map
-					normal = normalize(mv_tbn * (normalMap.rgb * 2.0 - 1.0));
+					// Tangent Space Normal Map. Two channel maps (BC5, like Fallout 4's) read blue as 0,
+					// which no tangent space normal has, so rebuild it from red and green.
+					vec3 tangentNormal = normalMap.rgb * 2.0 - 1.0;
+					if (normalMap.b < 0.01)
+						tangentNormal.b = sqrt(max(0.0, 1.0 - dot(tangentNormal.rg, tangentNormal.rg)));
+					normal = normalize(mv_tbn * tangentNormal);
 
 					if (bSpecular)
 					{

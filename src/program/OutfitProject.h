@@ -7,12 +7,23 @@ See the included LICENSE file
 
 #include "../components/Anim.h"
 #include "../components/Automorph.h"
+#include "../components/ClothData.h"
+#include "../components/ConformOptions.h"
 #include "../components/Mesh.h"
+#include "../components/UndoState.h"
+#include "../files/ObjFile.h"
+#include "../files/PhysicsXmlFile.h"
 #include "../files/SFMaterialResolver.h"
-#include "OutfitStudio.h"
+#include "ProjectHost.h"
+#include "../utils/TargetGame.h"
+
+#ifdef USE_FBXSDK
+#include "../files/FBXWrangler.h"
+#endif
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iosfwd>
 #include <map>
 #include <memory>
@@ -26,20 +37,13 @@ See the included LICENSE file
 #include <wx/arrstr.h>
 #include <wx/filename.h>
 
-struct ConformOptions {
-	float proximityRadius = 10.0f;
-	int maxResults = 10;
-	bool smoothResultDeltas = false;
-	int smoothIterations = 2;
-	float smoothStrength = 0.5f;
-	bool noSqueeze = false;
-	bool solidMode = false;
-	bool axisX = true;
-	bool axisY = true;
-	bool axisZ = true;
-	bool fixClipping = false;
-	float fixClippingStrength = 0.5f;
-	std::vector<std::string> sliderNames; // If empty, conform all non-zap/non-UV sliders
+class SliderSetIndex;
+
+// How saving finds the other projects that use the NIF and .osd file it writes
+enum class SharedFilesCheck {
+	Now,   // Looks through the projects while saving
+	Index, // Uses an index that was loaded for those file names before
+	Skip   // Doesn't look: keeps all other data in the .osd file, and doesn't ask about shapes of the NIF file
 };
 
 struct SliderDataKey {
@@ -54,8 +58,10 @@ struct SliderDataLocation {
 	std::string fileName;
 	std::string dataFileName;
 	std::string dataNameInFile;
-	bool local = false;	 // Data of this project
-	bool linked = false; // Data in the .osd file of another project in the same data folder
+	bool local = false;		 // Data of this project
+	bool linked = false;	 // Data in the .osd file of another project in the same data folder
+	bool inherited = false;	 // Data of the base project, which owns it
+	bool overridden = false; // Data of this project in place of the base project's
 	bool resolved = false;
 	bool isBSD = false;
 	std::string resolvedPath;
@@ -63,7 +69,39 @@ struct SliderDataLocation {
 	std::vector<std::string> dataFolders;
 };
 
-class OutfitStudioFrame;
+// Answers to the questions an OBJ or FBX import can ask. Unset answers are asked through the host.
+struct ImportChoices {
+	std::optional<bool> copyReferenceSkinTransform;
+	// The merge shape has the same vertex count: update it instead of adding a new shape
+	std::optional<bool> updateMatchingShape;
+	std::optional<bool> updatePositions;
+	std::optional<bool> updateUVs;
+	std::optional<bool> updateNormals;
+	std::optional<bool> updateWeights; // FBX only
+	std::optional<std::string> newShapeName;
+};
+
+// Bones whose transforms are inconsistent, and the fix chosen for each of them.
+struct BadBonesReport {
+	struct ShapeBadBones {
+		std::unordered_map<std::string, nifly::MatTransform> badStandard, badCustom;
+		bool fixStanSkin = false;
+	};
+
+	struct BadCustomBone {
+		std::unordered_set<std::string> badShapes, goodShapes;
+		enum FixType { DoNothing, TrustNode, TrustSkin };
+		int fixtype = DoNothing;
+		std::string trustShape;
+	};
+
+	// Every skinned shape by name, including those without bad bones
+	std::unordered_map<std::string, ShapeBadBones> shapeBBs;
+	// Bad custom bones by bone name
+	std::unordered_map<std::string, BadCustomBone> badCBs;
+	bool found = false;
+};
+
 struct UndoStateShape;
 struct UndoStateShapeDelete;
 
@@ -145,7 +183,9 @@ std::vector<bool> CalcVertexListForAsymmetryTasks(const SymmetricVertices& symve
 void AddWeldedToVertexList(const Mesh::WeldVertsType& welcVerts, std::vector<bool>& selVerts);
 
 class OutfitProject {
-	OutfitStudioFrame* owner = nullptr;
+	IProjectHost* host = nullptr;
+	std::unique_ptr<NonInteractiveHost> ownHost;
+	uint64_t instanceId = 0;
 
 	void UpdateProgress(int val, const wxString& msg = "");
 
@@ -153,8 +193,14 @@ class OutfitProject {
 	AnimInfo workAnim;
 	nifly::NiShape* baseShape = nullptr;
 
-	// All cloth data blocks that have been loaded during work
-	std::unordered_map<std::string, std::unique_ptr<nifly::BSClothExtraData>> clothData;
+	// Original cloth belongs to the imported shapes, not to an export-time choice.
+	ClothData clothData;
+
+	struct ShapeReferenceSource {
+		std::string projectFile;
+		std::string projectName;
+	};
+	std::unordered_map<std::string, ShapeReferenceSource> shapeRefSources;
 
 	// All HDT-SMP physics links that sat on the root node of a loaded NIF. The
 	// game reads only one of them, so a single one is picked for the output.
@@ -194,6 +240,10 @@ class OutfitProject {
 	// Local slider data can point to the .osd file of another project in the same data folder.
 	bool SliderDataIsLinked(const DiffInfo& dataFile);
 	void UnlinkSliderData(DiffInfo& dataFile);
+	// Makes inherited slider data the project's own, which is saved to its own .osd file then.
+	void DetachSliderData(DiffInfo& dataFile);
+	// Shows what loading the base project of a variant or add-on turned up.
+	void ReportResolveStatus();
 	// Whether saving keeps the slider data entry as it is instead of writing its data to the project's own .osd file.
 	bool KeepSliderDataLink(const DiffInfo* dataFile,
 							const std::string& shapeName,
@@ -201,6 +251,17 @@ class OutfitProject {
 							const bool hasDiff,
 							const std::string& osdFileName,
 							const std::string& prevOSDFileName);
+	// Asks before saving removes shapes from a NIF file that other projects use as their source file.
+	bool ConfirmSharedNifShapes(const SliderSetIndex& index, const std::string& nifFilePath, const std::string& setFile, const std::string& setName, bool copyRef);
+
+	// Geometry of an add-on's shapes when it was loaded, which come from its base project
+	uint64_t addOnGeometryHash = 0;
+	// The reference shape then and its geometry, which loading another reference replaces
+	std::string addOnRefShapeName;
+	uint64_t addOnRefShapeHash = 0;
+	std::set<std::string> addOnShapeNames; // All shapes then
+	// Remembers the geometry of an add-on's shapes, or forgets it for other projects
+	void RecordAddOnGeometry(bool addOn);
 
 	SFMaterialResolver sfMaterialResolver;
 
@@ -247,13 +308,41 @@ public:
 	// is about to be merged into the work NIF, keyed by shape name.
 	void CapturePhysicsFiles(nifly::NifFile& nif, const std::vector<nifly::NiShape*>& shapes);
 
-	// Set while an unattended script drives the project. Prompts that would
-	// otherwise stall the run fall back to their default answer instead.
-	bool suppressPrompts = false;
+	// Without a host, the project runs unattended and answers prompts with their defaults.
+	// Copy of the editable project data, to return to after trying out a change.
+	// Not included: the shared skeleton, cloth and physics extra data, and the file names the project was saved as.
+	struct Snapshot {
+		nifly::NifFile workNif;
+		AnimInfo workAnim;
+		DiffDataSets baseDiffData;
+		DiffDataSets morphResults;
+		std::unordered_map<std::string, std::string> morphDataNames;
+		SliderSet activeSet;
+		std::string outfitName;
+		std::string baseShapeName;
+		std::string refProjectFile;
+		std::string refProjectName;
+		std::string refShapeName;
+		std::unordered_map<std::string, ShapeReferenceSource> shapeRefSources;
+		std::unordered_map<std::string, std::vector<std::string>> shapeTextures;
+		std::unordered_map<std::string, MaterialFile> shapeMaterialFiles;
+		std::unordered_map<std::string, std::shared_ptr<const SFLayeredMaterial>> shapeSFMaterials;
+		std::unordered_map<std::string, std::vector<std::string>> shapePhysicsFiles;
+		ClothData::ShapeSources clothSources;
+	};
 
-	// inOwner is meant to provide access to OutfitStudio for the purposes of reporting process status only.
-	OutfitProject(OutfitStudioFrame* inOwner = nullptr);
+	std::unique_ptr<Snapshot> CaptureSnapshot();
+	// Shape pointers into the work NIF are invalid afterwards
+	void RestoreSnapshot(const Snapshot& snapshot);
+
+	// Without loadSkeleton the shared skeleton stays as it is, for a project loaded next to the open one.
+	explicit OutfitProject(IProjectHost* inHost = nullptr, bool loadSkeleton = true);
 	~OutfitProject();
+
+	IProjectHost& GetHost() { return *host; }
+
+	// Unique for each project created while the program runs, unlike its address, which a new project can reuse
+	uint64_t GetInstanceId() const { return instanceId; }
 
 	wxString mFileName;
 	wxString mOutfitName;
@@ -279,6 +368,13 @@ public:
 	std::string mRefProjectName;    // Slider set name in the OSP file
 	std::string mRefShapeName;      // Shape name in the project
 
+	// Shape names in display and output order
+	std::vector<std::string> GetShapeOrder() { return workNif.GetShapeNames(); }
+
+	// Reference project a shape came from. It is restored when the shape becomes the reference again.
+	bool GetShapeReferenceSource(const std::string& shapeName, std::string& outProjectFile, std::string& outProjectName) const;
+	void SetShapeReferenceSource(const std::string& shapeName, const std::string& projectFile, const std::string& projectName);
+
 	// Returns a string error message or empty string on success.
 	std::string Save(const wxFileName& sliderSetFile,
 					 const wxString& strOutfitName,
@@ -291,9 +387,16 @@ public:
 					 bool preventMorphFile,
 					 bool keepZappedShapes,
 					 const wxString& strSFMorphPath = "",
-					 const wxString& strSFMorphTargetShape = "");
+					 const wxString& strSFMorphTargetShape = "",
+					 SharedFilesCheck sharedFilesCheck = SharedFilesCheck::Now,
+					 const SliderSetIndex* sharedFilesIndex = nullptr);
 
-	bool SaveSliderData(const std::string& fileName, bool copyRef = true, const std::string& osdFileName = "", const std::string& prevOSDFileName = "");
+	// Data that other projects use from the same file ('otherProjectData') stays in it.
+	bool SaveSliderData(const std::string& fileName,
+						bool copyRef = true,
+						const std::string& osdFileName = "",
+						const std::string& prevOSDFileName = "",
+						const std::set<std::string>* otherProjectData = nullptr);
 
 	nifly::NifFile* GetWorkNif() { return &workNif; }
 	AnimInfo* GetWorkAnim() { return &workAnim; }
@@ -302,7 +405,11 @@ public:
 	// Object" extra data to a readable stream (loose game data folder file,
 	// relative to the project's input NIF, or from loaded archives).
 	std::unique_ptr<std::istream> GetPhysicsXmlStream(const std::string& xmlPath);
-	std::unordered_map<std::string, std::unique_ptr<nifly::BSClothExtraData>>& GetClothData() { return clothData; }
+	// Reads the physics XML files linked to a shape (shapePhysicsFiles), by path. Paths that can't be found or
+	// parsed go to outMissing.
+	std::vector<std::pair<std::string, PhysicsXmlFile>> ReadPhysicsXmls(const std::string& shapeName, std::vector<std::string>* outMissing = nullptr);
+	const ClothData::Blocks& GetClothData() const { return clothData.GetBlocks(); }
+	void AddClothData(const std::string& source, std::unique_ptr<nifly::BSClothExtraData> block) { clothData.AddManual(source, std::move(block)); }
 
 	nifly::NiShape* GetBaseShape() { return baseShape; }
 	void SetBaseShape(nifly::NiShape* shape, const bool moveData = true);
@@ -323,8 +430,15 @@ public:
 	size_t SliderCount();
 	std::string GetSliderName(const size_t index);
 	void GetSliderList(std::vector<std::string>& sliderNames);
+	// Starts the reference data set of a new slider empty
+	void NewBaseDiffSet(const std::string& dataName, const std::string& target);
 	void AddEmptySlider(const std::string& newName);
 	void AddZapSlider(const std::string& newName, std::unordered_map<uint16_t, float>& verts, nifly::NiShape* shape);
+	// Vertices of a shape that a zap slider removes. Falls back to the loaded morph results for a reference
+	// shape whose data isn't in the base diff data, like the body of a project loaded for comparison.
+	std::vector<bool> GetZappedVertices(nifly::NiShape* shape, const std::string& sliderName);
+	// Replaces the data of an existing zap slider on a shape, keeping the slider's settings
+	void SetZappedVertices(nifly::NiShape* shape, const std::string& sliderName, const std::vector<bool>& zapped);
 	void AddCombinedSlider(const std::string& newName);
 
 	nifly::NiShape* CreateNifShapeFromData(const std::string& shapeName,
@@ -338,6 +452,14 @@ public:
 	void GetSliderDataLocations(std::vector<SliderDataLocation>& outLocations, const std::string& sliderName = "");
 	bool SliderDataIsExternal(const std::string& sliderName, nifly::NiShape* shape);
 	std::string EnsureSliderDataLocal(const std::string& sliderName, nifly::NiShape* shape);
+	// Whether the base project of a variant or add-on has the slider.
+	bool SliderFromBase(const std::string& sliderName);
+	// The inherited data that renaming a slider or shape makes the project's own, which disconnects it from the base project.
+	std::vector<SliderDataKey> RenameDisconnectsFromBase(const std::string& sliderName, const std::string& shapeName);
+	// Replaces the project's own data of a slider with the base project's again.
+	bool RevertSliderDataToBase(const SliderDataKey& key, std::string* errorMessage = nullptr);
+	// Shapes, their vertices, triangles, UVs and weights, to tell whether they changed.
+	uint64_t ShapeGeometryHash(const std::function<bool(const std::string&)>& includeShape);
 	bool SetSliderDataLocal(const SliderDataKey& key, std::string* errorMessage = nullptr);
 	bool SetSliderDataLocal(const size_t sliderIndex, const size_t dataIndex, std::string* errorMessage = nullptr);
 	bool SetSliderDataExternal(const size_t sliderIndex, const size_t dataIndex, const std::vector<std::string>& dataFolders, std::string* errorMessage = nullptr);
@@ -350,12 +472,19 @@ public:
 	bool SliderZap(const size_t index);
 	bool SliderUV(const size_t index);
 	wxArrayString SliderZapToggles(const size_t index);
+	bool SliderToggle(const size_t index);
+	float SliderToggleValue(const size_t index);
+	std::vector<ToggleTarget> SliderToggleSliders(const size_t index);
 	bool SliderInvert(const size_t index);
 	bool SliderHidden(const size_t index);
 	bool SliderIndexFromName(const std::string& sliderName, size_t& index);
 
 	void SetSliderZap(const size_t index, const bool zap);
 	void SetSliderZapToggles(const size_t index, const wxArrayString& toggles);
+	void SetSliderToggle(const size_t index, const bool toggle);
+	void SetSliderToggleValue(const size_t index, const float value);
+	// Sliders and zaps that the toggle sets while ticked. Leaves out the toggle itself, other toggles, clamps and sliders that don't exist.
+	void SetSliderToggleSliders(const size_t index, const std::vector<ToggleTarget>& targets);
 	void SetSliderInvert(const size_t index, const bool inv);
 	void SetSliderUV(const size_t index, const bool uv);
 	void SetSliderHidden(const size_t index, const bool hidden);
@@ -402,7 +531,12 @@ public:
 	const std::string& ShapeToTarget(const std::string& shapeName);
 	const std::string& TargetToShape(const std::string& targetName);
 	int GetVertexCount(nifly::NiShape* shape);
-	void GetLiveVerts(nifly::NiShape* shape, std::vector<nifly::Vector3>& outVerts, std::vector<nifly::Vector2>* outUVs = nullptr);
+	// outPoseRotations, if given, gets the skinning rotation of each vertex while posed (see
+	// ApplySkinningToVerts) and is emptied otherwise.
+	void GetLiveVerts(nifly::NiShape* shape,
+					  std::vector<nifly::Vector3>& outVerts,
+					  std::vector<nifly::Vector2>* outUVs = nullptr,
+					  std::vector<nifly::Matrix3>* outPoseRotations = nullptr);
 	// GetLiveVerts without the pose: the shape as the sliders morph it
 	void GetMorphedVerts(nifly::NiShape* shape, std::vector<nifly::Vector3>& outVerts, std::vector<nifly::Vector2>* outUVs = nullptr);
 	void GetSliderDiff(nifly::NiShape* shape, const std::string& sliderName, std::vector<nifly::Vector3>& outVerts);
@@ -435,6 +569,9 @@ public:
 	// pose-independent undo/redo. Only has effect when bPose is true.
 	void ComputeUndoRestDiffs(nifly::NiShape* shape, UndoStateShape& uss);
 	void ScaleMorphResult(nifly::NiShape* shape, const std::string& sliderName, float scaleValue);
+	// Smooths the morph of an outfit shape for a slider. Fully masked vertices keep their morph.
+	// Returns false if the shape has no morph for the slider.
+	bool SmoothSliderDiff(nifly::NiShape* shape, const std::string& sliderName, int iterations, float strength);
 	void MoveVertex(nifly::NiShape* shape, const nifly::Vector3& pos, const int& id);
 	void OffsetShape(nifly::NiShape* shape, const nifly::Vector3& xlate, std::unordered_map<uint16_t, float>* mask = nullptr);
 	void ScaleShape(nifly::NiShape* shape, const nifly::Vector3& scale, std::unordered_map<uint16_t, float>* mask = nullptr);
@@ -489,7 +626,36 @@ public:
 	int LoadReference(
 		const std::string& fileName, const std::string& setName, const std::string& shapeName = "", bool mergeSliders = false, bool mergeZaps = false, bool appendNewSliders = true);
 
-	int LoadFromSliderSet(const std::string& fileName, const std::string& setName, std::vector<std::string>* origShapeOrder = nullptr);
+	// Adds the sliders of the installed add-ons of the reference project to the reference shape, marked as needing
+	// their add-on. Returns the names of the added sliders.
+	std::vector<std::string> LoadReferenceAddOns();
+
+	// shapeDataPath is the ShapeData folder the set's files are in, the program's own by default
+	int LoadFromSliderSet(const std::string& fileName,
+						  const std::string& setName,
+						  std::vector<std::string>* origShapeOrder = nullptr,
+						  const std::string& shapeDataPath = "");
+	// Loads the reference shape again with its slider data, after loading a set with LoadFromSliderSet.
+	int ReloadReferenceShape();
+	// Makes a new variant or add-on of a project, which inherits all of its sliders.
+	// It's saved under 'projectName' once it gets a project file.
+	int CreateFromBase(const std::string& fileName, const std::string& setName, bool addOn, const std::string& projectName);
+	// Turns the project just loaded from 'fileName' into a new variant or add-on of it.
+	void MakeDerivedProject(const std::string& fileName, const std::string& setName, bool addOn, const std::string& projectName);
+	// Makes the project a variant or add-on of another one. Its sliders and data that equal the base project's
+	// become inherited, the base project's sliders it doesn't have are left out.
+	bool SetBaseProject(const std::string& fileName, const std::string& setName, bool addOn, std::string* errorMessage = nullptr);
+	// Makes a variant or add-on a project of its own again, with all of its sliders and data.
+	void ClearBaseProject();
+	// True if shapes of an add-on's base project changed since it was loaded, which it can't save
+	bool AddOnGeometryChanged();
+	// Turns an add-on into a variant of its base project, which saves its shapes to a NIF file of its own.
+	// Returns the name of that NIF file, named like the add-on's .osd file (or 'projectName' without one).
+	std::string ConvertAddOnToVariant(const std::string& projectName);
+	// The .osd file an add-on saves its own slider data to.
+	void SetAddOnDataFile(const std::string& fileName);
+	// Whether the project has the shapes of the other project, which an add-on of it needs.
+	bool BaseGeometryMatches(const std::string& fileName, const std::string& setName);
 	int AddFromSliderSet(const std::string& fileName,
 						 const std::string& setName,
 						 const bool newDataLocal = false,
@@ -505,7 +671,15 @@ public:
 
 	bool PrepareCollapseVertex(nifly::NiShape* shape, UndoStateShape& uss, const std::vector<uint16_t>& indices);
 	bool PrepareFlipEdge(nifly::NiShape* shape, UndoStateShape& uss, const nifly::Edge& edge);
-	bool PrepareRefineMesh(nifly::NiShape* shape, UndoStateShape& uss, std::vector<bool>& pincs, const Mesh::WeldVertsType& weldVerts, const bool noCurveOffset, std::vector<nifly::Edge>* badEdges = nullptr);
+	// Splits the edges whose vertices are both in pincs, and that splitEdge accepts when it's given. splitEdge has to give
+	// both directions of an edge and its welded copies the same answer.
+	bool PrepareRefineMesh(nifly::NiShape* shape,
+						   UndoStateShape& uss,
+						   std::vector<bool>& pincs,
+						   const Mesh::WeldVertsType& weldVerts,
+						   const bool noCurveOffset,
+						   std::vector<nifly::Edge>* badEdges = nullptr,
+						   const std::function<bool(const nifly::Edge&)>& splitEdge = {});
 
 	bool IsVertexOnBoundary(nifly::NiShape* shape, int vi);
 	bool PointsHaveDifferingWeightsOrDiffs(nifly::NiShape* shape1, int p1, nifly::NiShape* shape2, int p2);
@@ -545,11 +719,19 @@ public:
 	void WriteAnimToNif(nifly::NifFile& nif, const std::string& shapeException = "");
 	void ResetTransforms();
 
+	// Gives a shape without one the default shader of the target game, with an empty texture set. False if it had one
+	// or the shape can't have one.
+	bool AddShader(nifly::NiShape* s);
+
 	void CreateSkinning(nifly::NiShape* s);
 	void RemoveSkinning(nifly::NiShape* s);
 	void RemoveSkinning();
 
-	bool CheckForBadBones(bool interactive = true);
+	// Finds bones with inconsistent transforms and recommends a fix for each of them.
+	BadBonesReport FindBadBones();
+	void FixBadBones(const BadBonesReport& report);
+	// Applies the recommended fixes. Returns false if there were no bad bones.
+	bool CheckForBadBones();
 	bool ShapeHasBadBones(nifly::NiShape* s);
 
 	void GetAllPoseTransforms(nifly::NiShape* s, std::vector<nifly::MatTransform>& ts);
@@ -577,7 +759,11 @@ public:
 	// No-op for non-Starfield NIFs.
 	void GenerateStarfieldMeshlets(nifly::NifFile& nif);
 
-	int ImportOBJ(const std::string& fileName, const std::string& shapeName = "", nifly::NiShape* mergeShape = nullptr);
+	int ImportOBJ(const std::string& fileName,
+				  const ObjImportOptions& options,
+				  const std::string& shapeName = "",
+				  nifly::NiShape* mergeShape = nullptr,
+				  const ImportChoices& choices = {});
 	int ExportOBJ(const std::string& fileName,
 				  const std::vector<nifly::NiShape*>& shapes,
 				  bool transToGlobal,
@@ -585,7 +771,11 @@ public:
 				  const nifly::Vector3& offset = nifly::Vector3());
 
 #ifdef USE_FBXSDK
-	int ImportFBX(const std::string& fileName, const std::string& shapeName = "", nifly::NiShape* mergeShape = nullptr);
+	int ImportFBX(const std::string& fileName,
+				  const FBXImportOptions& options,
+				  const std::string& shapeName = "",
+				  nifly::NiShape* mergeShape = nullptr,
+				  const ImportChoices& choices = {});
 	int ExportFBX(const std::string& fileName, const std::vector<nifly::NiShape*>& shapes, bool transToGlobal);
 #endif
 };

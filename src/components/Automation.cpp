@@ -6,6 +6,7 @@ See the included LICENSE file
 #include "Automation.h"
 
 #include "../utils/PlatformUtil.h"
+#include "../utils/StringStuff.h"
 
 #include <tinyxml2.h>
 
@@ -217,6 +218,7 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 			FieldFloat("ProximityRadius", &Step::weightProximityRadius, 10.0f, "txtWeightRadius", AutomationFieldUI::Text, "%.1f"),
 			FieldInt("MaxResults", &Step::weightMaxResults, 10, "txtWeightMaxResults"),
 			FieldStringList("BoneList", &Step::weightBoneList, "txtWeightBoneList"),
+			FieldBool("Normalize", &Step::weightNormalize, false, "chkWeightNormalize"),
 		});
 
 	add(AutomationStepType::TransferWeights, "TransferWeights", wxTRANSLATE("Bones"), wxTRANSLATE("Bones: Transfer Selected Weights"), "pageTransferWeights",
@@ -256,6 +258,7 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 		{
 			FieldString("FilePath", &Step::exportFilePath, nullptr),
 			FieldBool("WithRef", &Step::exportWithRef, true, "chkExportWithRef"),
+			FieldBool("HeadTri", &Step::exportHeadTri, false, "chkExportHeadTri"),
 			FieldBool("UseOriginalPath", &Step::exportUseOriginalPath, false),
 			FieldString("Prefix", &Step::exportPrefix, "txtExportPrefix"),
 			FieldString("Suffix", &Step::exportSuffix, "txtExportSuffix"),
@@ -303,6 +306,16 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 			FieldStringList("SliderNames", &Step::sliderNames, "txtSliderNames"),
 		});
 
+	add(AutomationStepType::ImportFromGame, "ImportFromGame", wxTRANSLATE("Import"), wxTRANSLATE("Import: From Other Game"), "pageImportFromGame",
+		{
+			FieldString("FilePath", &Step::gameImportFile, "txtGameImportFile"),
+			FieldString("Set", &Step::gameImportSet, "txtGameImportSet"),
+			FieldStringList("DataFolders", &Step::gameImportDataFolders, "txtGameImportDataFolders"),
+			FieldStringList("Shapes", &Step::gameImportShapes, "txtGameImportShapes"),
+			FieldStringList("SkipShapes", &Step::gameImportSkipShapes, "txtGameImportSkipShapes"),
+			FieldString("Sliders", &Step::gameImportSliders, "txtGameImportSliders"),
+		});
+
 	// Project
 	add(AutomationStepType::AddProject, "AddProject", wxTRANSLATE("Project"), wxTRANSLATE("Project: Add Project"), "pageAddProject",
 		ProjectSourceFields(nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, "chkAddProjAppendSliders"));
@@ -310,8 +323,11 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 	add(AutomationStepType::ClearProject, "ClearProject", wxTRANSLATE("Project"), wxTRANSLATE("Project: Clear Project"), "pageClearProject");
 	add(AutomationStepType::ClearReference, "ClearReference", wxTRANSLATE("Project"), wxTRANSLATE("Project: Clear Reference"), "pageClearReference");
 
-	add(AutomationStepType::LoadReference, "LoadReference", wxTRANSLATE("Project"), wxTRANSLATE("Project: Load Reference"), "pageLoadReference",
-		ProjectSourceFields(nullptr, nullptr, nullptr, "chkRefLoadAll", "chkRefMergeSliders", "chkRefMergeZaps", "chkRefAppendNewSliders"));
+	add(AutomationStepType::LoadReference, "LoadReference", wxTRANSLATE("Project"), wxTRANSLATE("Project: Load Reference"), "pageLoadReference", [] {
+		auto fields = ProjectSourceFields(nullptr, nullptr, nullptr, "chkRefLoadAll", "chkRefMergeSliders", "chkRefMergeZaps", "chkRefAppendNewSliders");
+		fields.push_back(FieldBool("LoadAddOns", &Step::refLoadAddOns, false, "chkRefLoadAddOns"));
+		return fields;
+	}());
 
 	add(AutomationStepType::MakeConversionRef, "MakeConversionRef", wxTRANSLATE("Project"), wxTRANSLATE("Project: Make Conversion Reference"), "pageMakeConversionRef",
 		{
@@ -324,6 +340,7 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 		{
 			FieldString("ShapeName", &Step::setRefShapeName, "txtSetRefShapeName"),
 			FieldBool("UnsetReference", &Step::setRefUnset, false, "chkSetRefUnset"),
+			FieldBool("SkipIfMissing", &Step::setRefSkipIfMissing, false, "chkSetRefSkipIfMissing"),
 		});
 
 	// Shapes
@@ -373,6 +390,7 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 			FieldString("SourceShape", &Step::mergeSourceShape, "txtMergeSourceShape"),
 			FieldString("TargetShape", &Step::mergeTargetShape, "txtMergeTargetShape"),
 			FieldBool("DeleteSource", &Step::mergeDeleteSource, false, "chkMergeDeleteSource"),
+			FieldBool("SkipIfMissing", &Step::mergeSkipIfMissing, false, "chkMergeSkipIfMissing"),
 		});
 
 	add(AutomationStepType::MirrorShape, "MirrorShape", wxTRANSLATE("Shapes"), wxTRANSLATE("Shapes: Mirror Shape"), "pageMirrorShape",
@@ -397,6 +415,7 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 		{
 			FieldString("OldName", &Step::renameOldName, "txtRenameOldName"),
 			FieldString("NewName", &Step::renameNewName, "txtRenameNewName"),
+			FieldBool("SkipIfMissing", &Step::renameSkipIfMissing, false, "chkRenameSkipIfMissing"),
 		});
 
 	add(AutomationStepType::ApplyTransforms, "ApplyTransforms", wxTRANSLATE("Shapes"), wxTRANSLATE("Shapes: Apply Transforms"), "pageApplyTransforms");
@@ -416,6 +435,15 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 			FieldBool("Unmatched", &Step::asymDoUnmatched, false, "chkSymVertUnmatched"),
 			FieldBool("Sliders", &Step::asymDoSliders, false, "chkSymVertSliders"),
 			FieldBool("Bones", &Step::asymDoBones, false, "chkSymVertBones"),
+		});
+
+	add(AutomationStepType::SmoothVertices, "SmoothVertices", wxTRANSLATE("Shapes"), wxTRANSLATE("Shapes: Smooth Vertices"), "pageSmoothVertices",
+		{
+			FieldInt("Iterations", &Step::smoothIterations, 10, "txtSmoothIterations"),
+			FieldFloat("Strength", &Step::smoothStrength, 0.1f, "txtSmoothStrength", AutomationFieldUI::Text, "%.3f"),
+			FieldStringList("FollowShapes", &Step::smoothFollowShapes, "txtSmoothFollowShapes"),
+			FieldFloat("FollowRadius", &Step::smoothFollowRadius, 1.5f, "txtSmoothFollowRadius", AutomationFieldUI::Text, "%.2f"),
+			FieldBool("KeepBorders", &Step::smoothKeepBorders, true, "chkSmoothKeepBorders"),
 		});
 
 	add(AutomationStepType::TransformShape, "TransformShape", wxTRANSLATE("Shapes"), wxTRANSLATE("Shapes: Transform Shape"), "pageTransformShape",
@@ -557,6 +585,24 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 			FieldBool("Bones", &Step::asymDoBones, false, "chkMaskAsymBones"),
 		});
 
+	add(AutomationStepType::MaskBox, "MaskBox", wxTRANSLATE("Masks"), wxTRANSLATE("Masks: Mask Box"), "pageMaskBox",
+		{
+			FieldFloat("MinX", &Step::maskBoxMinX, -100000.0f, "txtMaskBoxMinX"),
+			FieldFloat("MinY", &Step::maskBoxMinY, -100000.0f, "txtMaskBoxMinY"),
+			FieldFloat("MinZ", &Step::maskBoxMinZ, -100000.0f, "txtMaskBoxMinZ"),
+			FieldFloat("MaxX", &Step::maskBoxMaxX, 100000.0f, "txtMaskBoxMaxX"),
+			FieldFloat("MaxY", &Step::maskBoxMaxY, 100000.0f, "txtMaskBoxMaxY"),
+			FieldFloat("MaxZ", &Step::maskBoxMaxZ, 100000.0f, "txtMaskBoxMaxZ"),
+			FieldBool("KeepOthers", &Step::maskBoxKeepOthers, false, "chkMaskBoxKeepOthers"),
+		});
+
+	add(AutomationStepType::MaskCovered, "MaskCovered", wxTRANSLATE("Masks"), wxTRANSLATE("Masks: Mask Covered Vertices"), "pageMaskCovered",
+		{
+			FieldStringList("CoverShapes", &Step::maskCoverShapes, "txtMaskCoverShapes"),
+			FieldFloat("Outside", &Step::maskCoverOutside, 2.0f, "txtMaskCoverOutside", AutomationFieldUI::Text, "%.2f"),
+			FieldFloat("Inside", &Step::maskCoverInside, 1.0f, "txtMaskCoverInside", AutomationFieldUI::Text, "%.2f"),
+		});
+
 	add(AutomationStepType::MaskBoneWeighted, "MaskBoneWeighted", wxTRANSLATE("Masks"), wxTRANSLATE("Masks: Mask Bone-Weighted Vertices"), "pageMaskBoneWeighted",
 		{
 			FieldStringList("BoneNames", &Step::maskBoneNames, "txtMaskBoneNames"),
@@ -574,6 +620,11 @@ std::vector<AutomationStepInfo> BuildStepTypes() {
 			FieldString("MaskFile", &Step::saveMaskFile, "txtSaveMaskFile"),
 			FieldString("MaskName", &Step::saveMaskName, "txtSaveMaskName"),
 			FieldBool("Merge", &Step::saveMaskMerge, true, "chkSaveMaskMerge"),
+		});
+
+	add(AutomationStepType::SmoothMask, "SmoothMask", wxTRANSLATE("Masks"), wxTRANSLATE("Masks: Smooth Mask"), "pageSmoothMask",
+		{
+			FieldInt("Iterations", &Step::maskSmoothCount, 1, "txtMaskSmoothCount"),
 		});
 
 	// Nodes
@@ -805,6 +856,7 @@ int AutomationScript::Load(const std::string& fileName) {
 			step.targetMeshes = SplitCommaSeparated(meshesText);
 
 		step.targetRegex = GetChildBool(stepElem, "TargetRegex", false);
+		step.targetReference = GetChildBool(stepElem, "TargetReference", false);
 
 		// Type specific parameters come from the step type's field table
 		const AutomationStepInfo& info = GetAutomationStepInfo(step.type);
@@ -896,6 +948,7 @@ int AutomationScript::Save(const std::string& fileName) {
 			SetChildText(doc, stepElem, "TargetMeshes", JoinStrings(step.targetMeshes, ", "));
 
 		SetChildBool(doc, stepElem, "TargetRegex", step.targetRegex, false);
+		SetChildBool(doc, stepElem, "TargetReference", step.targetReference, false);
 
 		// Type specific parameters come from the step type's field table
 		const AutomationStepInfo& info = GetAutomationStepInfo(step.type);
@@ -993,4 +1046,57 @@ void AutomationScript::SubstitutePlaceholders(const std::map<std::string, std::s
 
 		SubstituteStepPlaceholders(step, vars);
 	}
+}
+
+namespace {
+
+const std::vector<AutomationTexturePathDef> TexturePathDefs = {
+	{0, "Diffuse", "0: Diffuse"},
+	{1, "Normal", "1: Normal"},
+	{2, "Glow/Skin", "2: Glow/Skin"},
+	{3, "Parallax", "3: Parallax"},
+	{4, "Environment", "4: Environment"},
+	{5, "Env Mask", "5: Env Mask"},
+	{6, "6", "6"},
+	{7, "Specular", "7: Specular"},
+	{8, "8", "8"},
+	{9, "9", "9"},
+	{10, "10", "10"},
+	{11, "11", "11"},
+	{12, "12", "12"}
+};
+
+} // namespace
+
+const std::vector<AutomationTexturePathDef>& GetAutomationTexturePathDefs() {
+	return TexturePathDefs;
+}
+
+const AutomationTexturePathDef* FindAutomationTexturePathDef(int index) {
+	for (const auto& def : TexturePathDefs) {
+		if (def.index == index)
+			return &def;
+	}
+	return nullptr;
+}
+
+int AutomationTexturePathIndexForName(const std::string& name) {
+	std::string nameLower = ToLower(name);
+	for (const auto& def : TexturePathDefs) {
+		if (nameLower == ToLower(def.name) || nameLower == ToLower(def.label))
+			return def.index;
+	}
+	return -1;
+}
+
+int ResolveAutomationTexturePathIndex(const AutomationStep::TexturePath& path) {
+	if (path.index >= 0)
+		return path.index;
+
+	return AutomationTexturePathIndexForName(path.name);
+}
+
+std::string AutomationTexturePathNameForIndex(int index) {
+	const AutomationTexturePathDef* def = FindAutomationTexturePathDef(index);
+	return def ? def->name : std::to_string(index);
 }

@@ -10,6 +10,7 @@ See the included LICENSE file
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,6 +43,8 @@ public:
 	bool Write(const std::string& fileName);
 
 	TargetData& GetDataDiffs();
+	// Names of all data in the file, without converting the data
+	std::vector<std::string> GetDataNames() const;
 	std::unique_ptr<TargetDataDiffs>* GetDataDiff(const std::string& dataName);
 	void SetDataDiff(const std::string& dataName, const TargetDataDiffs& inDataDiff);
 };
@@ -59,13 +62,20 @@ class DiffDataSets {
 	TargetDataDiffs* MaterializeSet(const std::string& name);
 
 public:
+	DiffDataSets() = default;
+	DiffDataSets(const DiffDataSets& other);
+	DiffDataSets& operator=(const DiffDataSets& other);
+	DiffDataSets(DiffDataSets&&) = default;
+	DiffDataSets& operator=(DiffDataSets&&) = default;
+
 	inline bool TargetMatch(const std::string& set, const std::string& target);
 	void MoveToSet(const std::string& name, const std::string& target, std::unique_ptr<TargetDataDiffs>& inDiffData);
 	void LoadSet(const std::string& name, const std::string& target, const TargetDataDiffs& inDiffData);
 	int LoadSet(const std::string& name, const std::string& target, const std::string& fromFile);
 	int SaveSet(const std::string& name, const std::string& target, const std::string& toFile);
 	bool LoadData(const std::map<std::string, std::map<std::string, std::string>>& osdNames);
-	bool SaveData(const std::map<std::string, std::map<std::string, std::string>>& osdNames);
+	// 'keepData' names data per file that is copied over from the file being replaced, unless it's saved anew.
+	bool SaveData(const std::map<std::string, std::map<std::string, std::string>>& osdNames, const std::map<std::string, std::set<std::string>>* keepData = nullptr);
 
 	void RenameSet(const std::string& oldName, const std::string& newName);
 	void RenameDataTarget(const std::string& oldTarget, const std::string& newTarget);

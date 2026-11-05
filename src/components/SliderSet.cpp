@@ -5,11 +5,71 @@ See the included LICENSE file
 
 #include "SliderSet.h"
 #include "SliderDataFileUtil.h"
+#include "SliderSetInheritance.h"
 #include "../utils/PlatformUtil.h"
 #include "../utils/StringStuff.h"
 
+#include <chrono>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
+#include <random>
 
+namespace {
+constexpr const char* SliderSetElement = "SliderSet";
+constexpr const char* SliderSetAddOnElement = "SliderSetAddOn";
+
+bool IsSliderSetElement(const XMLElement* element) {
+	return std::strcmp(element->Name(), SliderSetElement) == 0 || std::strcmp(element->Name(), SliderSetAddOnElement) == 0;
+}
+
+// Elements of a set that this version reads and writes. Others are kept as they are.
+bool IsKnownSliderSetElement(const char* elementName) {
+	static const char* const knownElements[] = {"ReferenceInfo",
+												"BaseProject",
+												"DataFolder",
+												"SetFolder",
+												"SourceFile",
+												"SliderDataFile",
+												"OutputPath",
+												"OutputFile",
+												"SFMorphPath",
+												"SFMorphTargetShape",
+												"Shape",
+												"BaseShapeName",
+												"Slider",
+												"RemovedSlider",
+												"Notes"};
+
+	for (auto knownElement : knownElements)
+		if (std::strcmp(elementName, knownElement) == 0)
+			return true;
+
+	return false;
+}
+
+// OSD data that is kept under another name than its name in the file
+struct RenamedOSDData {
+	std::string dataNameInFile;
+	std::string dataName;
+	std::string targetName;
+};
+
+void LoadRenamedOSDData(DiffDataSets& dataStorage, const std::map<std::string, std::vector<RenamedOSDData>>& renamedData) {
+	for (auto& file : renamedData) {
+		std::map<std::string, std::string> dataNames;
+		for (auto& data : file.second)
+			dataNames[data.dataNameInFile] = data.targetName;
+
+		DiffDataSets loaded;
+		loaded.LoadData({{file.first, dataNames}});
+
+		for (auto& data : file.second)
+			if (TargetDataDiffs* diff = loaded.GetDiffSet(data.dataNameInFile))
+				dataStorage.LoadSet(data.dataName, data.targetName, *diff);
+	}
+}
+} // namespace
 
 SliderSet::SliderSet() {}
 
@@ -146,15 +206,16 @@ size_t SliderSet::CloneSlider(const std::string& sliderName, const std::string& 
 	clonedSlider.name = cloneName;
 	clonedSlider.curValue = 0.0f;
 	clonedSlider.zapToggles.clear();
+	clonedSlider.ForgetSliders([&cloneName](const std::string& slider) { return slider == cloneName; });
+	clonedSlider.ClearInherited();
 
 	return sliders.size() - 1;
 }
 
 void SliderSet::DeleteSlider(const std::string& sliderName) {
 	// Delete toggles from other sliders
-	for (auto& slider : sliders) {
-		slider.zapToggles.erase(std::remove(slider.zapToggles.begin(), slider.zapToggles.end(), sliderName), slider.zapToggles.end());
-	}
+	for (auto& slider : sliders)
+		slider.ForgetSliders([&sliderName](const std::string& toggled) { return toggled == sliderName; });
 
 	// Find and delete slider
 	for (size_t i = 0; i < sliders.size(); i++) {
@@ -182,8 +243,48 @@ size_t SliderSet::CopySlider(SliderData* other) {
 	ms->defBigValue = other->defBigValue;
 	ms->defSmallValue = other->defSmallValue;
 	ms->zapToggles = other->zapToggles;
+	ms->bToggle = other->bToggle;
+	ms->toggleValue = other->toggleValue;
+	ms->toggleSliders = other->toggleSliders;
+	ms->bInherited = other->bInherited;
+	ms->addOnName = other->addOnName;
+	ms->addOnID = other->addOnID;
+	ms->bAutoConformed = other->bAutoConformed;
+	ms->stackedFrom = other->stackedFrom;
 	ms->dataFiles = other->dataFiles;
 	return sliders.size() - 1;
+}
+
+std::string SliderSet::GenerateProjectID() {
+	static std::mt19937_64 random{std::random_device{}() ^ static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
+	uint64_t high = random();
+	uint64_t low = random();
+
+	// Version 4 (random) and variant 1 as in RFC 4122
+	high = (high & 0xFFFFFFFFFFFF0FFFull) | 0x0000000000004000ull;
+	low = (low & 0x3FFFFFFFFFFFFFFFull) | 0x8000000000000000ull;
+
+	char id[37];
+	snprintf(id,
+			 sizeof(id),
+			 "%08x-%04x-%04x-%04x-%012llx",
+			 static_cast<uint32_t>(high >> 32),
+			 static_cast<uint32_t>((high >> 16) & 0xFFFF),
+			 static_cast<uint32_t>(high & 0xFFFF),
+			 static_cast<uint32_t>(low >> 48),
+			 static_cast<unsigned long long>(low & 0xFFFFFFFFFFFFull));
+	return id;
+}
+
+void SliderSet::ClearBaseProject() {
+	baseProjectFile.clear();
+	baseProjectName.clear();
+	baseProjectID.clear();
+	addOn = false;
+	sliderDataFile.clear();
+	removedSliders.clear();
+	for (auto& slider : sliders)
+		slider.ClearInherited();
 }
 
 int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const std::string& onlyShapeName) {
@@ -193,21 +294,21 @@ int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const s
 	std::string shapeStr = version >= 1 ? "Shape" : "BaseShapeName";
 	std::string dataFolderStr = version >= 1 ? "DataFolder" : "SetFolder";
 
-	name = element->Attribute("name");
+	name = AttributeText(element, "name");
 
 	XMLElement* tmpElement = element->FirstChildElement(dataFolderStr.c_str());
 	if (tmpElement) {
 		tmpElement->SetName("DataFolder");
-		datafolder = ToOSSlashes(tmpElement->GetText());
+		datafolder = ToOSSlashes(ElementText(tmpElement));
 	}
 
 	tmpElement = element->FirstChildElement("SourceFile");
 	if (tmpElement)
-		inputfile = tmpElement->GetText();
+		inputfile = ElementText(tmpElement);
 
 	tmpElement = element->FirstChildElement("OutputPath");
 	if (tmpElement)
-		outputpath = ToOSSlashes(tmpElement->GetText());
+		outputpath = ToOSSlashes(ElementText(tmpElement));
 
 	genWeights = true;
 	preventMorphFile = false;
@@ -215,7 +316,7 @@ int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const s
 
 	tmpElement = element->FirstChildElement("OutputFile");
 	if (tmpElement) {
-		outputfile = tmpElement->GetText();
+		outputfile = ElementText(tmpElement);
 		genWeights = tmpElement->BoolAttribute("GenWeights", true);
 		preventMorphFile = tmpElement->BoolAttribute("PreventMorphFile");
 		keepZappedShapes = tmpElement->BoolAttribute("KeepZappedShapes");
@@ -255,6 +356,7 @@ int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const s
 			shape.smoothSeamNormals = shapeName->BoolAttribute("SmoothSeamNormals", true);
 			shape.smoothSeamNormalsAngle = shapeName->FloatAttribute("SmoothSeamNormalsAngle", SliderSetShape::SliderSetDefaultSmoothAngle);
 			shape.lockNormals = shapeName->BoolAttribute("LockNormals", false);
+			shape.vertexCount = onlyShapeName.empty() ? shapeName->UnsignedAttribute("vertexCount") : 0;
 		}
 
 		shapeName = shapeName->NextSiblingElement(shapeStr.c_str());
@@ -271,6 +373,10 @@ int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const s
 	while (sliderEntry) {
 		SliderData tmpSlider;
 		if (tmpSlider.LoadSliderData(sliderEntry, genWeights) == 0) {
+			// What the set inherits doesn't carry over to the set the shape is added to
+			if (!onlyShapeName.empty())
+				tmpSlider.ClearInherited();
+
 			// Data of other targets would duplicate the entries of existing shapes with the same target
 			if (!onlyTarget.empty()) {
 				tmpSlider.dataFiles.erase(std::remove_if(tmpSlider.dataFiles.begin(),
@@ -290,7 +396,7 @@ int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const s
 
 					// Merge data of existing sliders
 					for (auto& df : tmpSlider.dataFiles)
-						s.AddDataFile(df.targetName, df.dataName, df.fileName, df.bLocal);
+						s.AddDataFile(df.targetName, df.dataName, df.fileName, df.bLocal, df.bInherited);
 
 					break;
 				}
@@ -336,6 +442,36 @@ int SliderSet::LoadSliderSet(XMLElement* element, bool appendNewSliders, const s
 		refShapeName.clear();
 	}
 
+	// Loading only one shape adds slider data, the set keeps its own base project
+	if (onlyShapeName.empty()) {
+		projectID = AttributeText(element, "id");
+		addOn = std::strcmp(element->Name(), SliderSetAddOnElement) == 0;
+
+		tmpElement = element->FirstChildElement("BaseProject");
+		baseProjectFile = tmpElement ? ToOSSlashes(AttributeText(tmpElement, "ProjectFile")) : "";
+		baseProjectName = tmpElement ? AttributeText(tmpElement, "ProjectName") : "";
+		baseProjectID = tmpElement ? AttributeText(tmpElement, "ProjectID") : "";
+
+		tmpElement = element->FirstChildElement("SliderDataFile");
+		sliderDataFile = tmpElement ? ElementText(tmpElement) : "";
+
+		removedSliders.clear();
+		for (tmpElement = element->FirstChildElement("RemovedSlider"); tmpElement; tmpElement = tmpElement->NextSiblingElement("RemovedSlider"))
+			AddRemovedSlider(AttributeText(tmpElement, "name"));
+
+		unknownElements.clear();
+		for (tmpElement = element->FirstChildElement(); tmpElement; tmpElement = tmpElement->NextSiblingElement()) {
+			if (IsKnownSliderSetElement(tmpElement->Name()))
+				continue;
+
+			XMLPrinter printer(nullptr, true);
+			tmpElement->Accept(&printer);
+			unknownElements.push_back(printer.CStr());
+		}
+
+		resolveStatus = SliderSetResolveStatus();
+	}
+
 	return 0;
 }
 
@@ -344,6 +480,16 @@ void SliderSet::LoadSetDiffData(DiffDataSets& inDataStorage, const std::string& 
 
 	for (auto& slider : sliders) {
 		for (auto& ddf : slider.dataFiles) {
+			if (ddf.bGenerated) {
+				if (!generatedData || (!forShape.empty() && TargetToShape(ddf.targetName) != forShape))
+					continue;
+
+				auto generated = generatedData->data.find(ddf.dataName);
+				if (generated != generatedData->data.end())
+					inDataStorage.LoadSet(ddf.dataName, generated->second.targetName, generated->second.diffs);
+				continue;
+			}
+
 			if (ddf.fileName.size() <= 4)
 				continue;
 
@@ -412,6 +558,8 @@ void SliderSet::Merge(
 	SliderSet& mergeSet, DiffDataSets& inDataStorage, DiffDataSets& baseDiffData, const std::string& baseShape, const bool newDataLocal, const bool appendNewSliders) {
 	std::map<std::string, std::map<std::string, std::string>> osdNames;
 	std::map<std::string, std::map<std::string, std::string>> osdNamesBase;
+	std::map<std::string, std::vector<RenamedOSDData>> osdRenamed;
+	std::map<std::string, std::vector<RenamedOSDData>> osdRenamedBase;
 
 	auto addSlider = [&](DiffInfo& ddf) {
 		if (ddf.fileName.size() <= 4)
@@ -468,6 +616,11 @@ void SliderSet::Merge(
 				baseDiffData.LoadSet(ddf.dataName, ddf.targetName, fullFilePath);
 		}
 		// OSD format
+		else if (dataName != ddf.dataName) {
+			// Data of renamed shapes is stored under its new name
+			auto& renamed = shapeName != baseShape ? osdRenamed : osdRenamedBase;
+			renamed[fullFilePath].push_back({dataName, ddf.dataName, ddf.targetName});
+		}
 		else {
 			// Cache data locations
 			if (shapeName != baseShape)
@@ -499,8 +652,9 @@ void SliderSet::Merge(
 			}
 		}
 		else if (appendNewSliders) {
-			// Copy new slider to the set
+			// Copy new slider to the set, it's this project's own now
 			sliders.push_back(s);
+			sliders.back().ClearInherited();
 			for (auto& ddf : sliders.back().dataFiles)
 				addSlider(ddf);
 		}
@@ -517,11 +671,20 @@ void SliderSet::Merge(
 	// Load from cached data locations at once
 	inDataStorage.LoadData(osdNames);
 	baseDiffData.LoadData(osdNamesBase);
+	LoadRenamedOSDData(inDataStorage, osdRenamed);
+	LoadRenamedOSDData(baseDiffData, osdRenamedBase);
 }
 
 void SliderSet::WriteSliderSet(XMLElement* sliderSetElement) {
 	sliderSetElement->DeleteChildren();
+	sliderSetElement->SetName(addOn ? SliderSetAddOnElement : SliderSetElement);
 	sliderSetElement->SetAttribute("name", name.c_str());
+
+	// Older versions keep the attributes of the element when they save the set
+	if (!projectID.empty())
+		sliderSetElement->SetAttribute("id", projectID.c_str());
+	else
+		sliderSetElement->DeleteAttribute("id");
 
 	if (!refProjectFile.empty() || !refProjectName.empty() || !refShapeName.empty()) {
 		XMLElement* newElement = sliderSetElement->GetDocument()->NewElement("ReferenceInfo");
@@ -536,6 +699,17 @@ void SliderSet::WriteSliderSet(XMLElement* sliderSetElement) {
 			refElement->SetAttribute("ShapeName", refShapeName.c_str());
 	}
 
+	if (HasBaseProject()) {
+		XMLElement* baseElement = sliderSetElement->InsertNewChildElement("BaseProject");
+		if (!baseProjectFile.empty()) {
+			std::string projectFile_bs = ToBackslashes(baseProjectFile);
+			baseElement->SetAttribute("ProjectFile", projectFile_bs.c_str());
+		}
+		baseElement->SetAttribute("ProjectName", baseProjectName.c_str());
+		if (!baseProjectID.empty())
+			baseElement->SetAttribute("ProjectID", baseProjectID.c_str());
+	}
+
 	XMLElement* newElement = sliderSetElement->GetDocument()->NewElement("DataFolder");
 	std::string datafolder_bs = ToBackslashes(datafolder);
 	XMLText* newText = sliderSetElement->GetDocument()->NewText(datafolder_bs.c_str());
@@ -544,6 +718,9 @@ void SliderSet::WriteSliderSet(XMLElement* sliderSetElement) {
 	newElement = sliderSetElement->GetDocument()->NewElement("SourceFile");
 	newText = sliderSetElement->GetDocument()->NewText(inputfile.c_str());
 	sliderSetElement->InsertEndChild(newElement)->ToElement()->InsertEndChild(newText);
+
+	if (addOn && !sliderDataFile.empty())
+		sliderSetElement->InsertNewChildElement("SliderDataFile")->SetText(sliderDataFile.c_str());
 
 	newElement = sliderSetElement->GetDocument()->NewElement("OutputPath");
 	std::string outputpath_bs = ToBackslashes(outputpath);
@@ -598,12 +775,17 @@ void SliderSet::WriteSliderSet(XMLElement* sliderSetElement) {
 		if (s.second.lockNormals)
 			baseShapeElement->SetAttribute("LockNormals", s.second.lockNormals);
 
+		if (addOn && s.second.vertexCount > 0)
+			baseShapeElement->SetAttribute("vertexCount", s.second.vertexCount);
+
 		newText = sliderSetElement->GetDocument()->NewText(s.first.c_str());
 		baseShapeElement->InsertEndChild(newText);
 	}
 
 	for (auto& slider : sliders) {
-		if (slider.dataFiles.size() == 0)
+		// Generated data is made anew each time the set is loaded. Toggles need no data of their own.
+		if (std::all_of(slider.dataFiles.begin(), slider.dataFiles.end(), [](const DiffInfo& df) { return df.bGenerated; })
+			&& (!slider.dataFiles.empty() || !slider.KeptWithoutData()))
 			continue;
 
 		newElement = sliderSetElement->GetDocument()->NewElement("Slider");
@@ -639,19 +821,51 @@ void SliderSet::WriteSliderSet(XMLElement* sliderSetElement) {
 		if (slider.bUV)
 			sliderElement->SetAttribute("uv", true);
 
+		bool isToggle = slider.bToggle && !slider.bZap;
+		if (isToggle) {
+			sliderElement->SetAttribute("toggle", true);
+			sliderElement->SetAttribute("togglevalue", slider.toggleValue);
+		}
+
+		if (slider.bInherited && HasBaseProject())
+			sliderElement->SetAttribute("inherited", true);
+
+		if (!slider.addOnName.empty())
+			sliderElement->SetAttribute("addon", slider.addOnName.c_str());
+		if (!slider.addOnID.empty())
+			sliderElement->SetAttribute("addonid", slider.addOnID.c_str());
+
 		for (auto& df : slider.dataFiles) {
+			if (df.bGenerated)
+				continue;
+
 			newElement = sliderSetElement->GetDocument()->NewElement("Data");
 			dataFileElement = sliderElement->InsertEndChild(newElement)->ToElement();
 			dataFileElement->SetAttribute("name", df.dataName.c_str());
 			dataFileElement->SetAttribute("target", df.targetName.c_str());
 			if (df.bLocal)
 				dataFileElement->SetAttribute("local", true);
+			if (df.bInherited && HasBaseProject())
+				dataFileElement->SetAttribute("inherited", true);
 
 			std::string fileName_bs = ToBackslashes(df.fileName);
 			newText = sliderSetElement->GetDocument()->NewText(fileName_bs.c_str());
 			dataFileElement->InsertEndChild(newText);
 		}
+
+		// The sliders that a toggle sets while ticked
+		if (isToggle) {
+			for (auto& target : slider.toggleSliders) {
+				XMLElement* setsElement = sliderElement->InsertNewChildElement("Sets");
+				setsElement->SetAttribute("slider", target.slider.c_str());
+				setsElement->SetAttribute("value", target.value);
+			}
+		}
 	}
+
+	if (HasBaseProject())
+		for (auto& removedSlider : removedSliders)
+			sliderSetElement->InsertNewChildElement("RemovedSlider")->SetAttribute("name", removedSlider.c_str());
 
 	if (!notes.empty()) {
 		newElement = sliderSetElement->GetDocument()->NewElement("Notes");
@@ -660,9 +874,17 @@ void SliderSet::WriteSliderSet(XMLElement* sliderSetElement) {
 		sliderSetElement->InsertEndChild(newElement)->ToElement()->InsertEndChild(newText);
 	}
 
+	// Elements of newer versions stay as they were
+	for (auto& unknownElement : unknownElements) {
+		XMLDocument elementDoc;
+		if (elementDoc.Parse(unknownElement.c_str()) != XML_SUCCESS || !elementDoc.RootElement())
+			continue;
+
+		sliderSetElement->InsertEndChild(elementDoc.RootElement()->DeepClone(sliderSetElement->GetDocument()));
+	}
 }
 
-std::string SliderSet::GetInputFileName() {
+std::string SliderSet::GetInputFileName() const {
 	std::string o;
 	o = baseDataPath + PathSepStr;
 	o += datafolder + PathSepStr;
@@ -729,14 +951,14 @@ void SliderSetFile::Open(const std::string& srcFileName) {
 	if (version < 1)
 		UpgradeLegacyFormat();
 
-	XMLElement* setElement;
-	std::string setname;
-	setElement = root->FirstChildElement("SliderSet");
-	while (setElement) {
-		setname = setElement->Attribute("name");
+	// Slider add-ons are a different element, so older versions don't list them
+	for (XMLElement* setElement = root->FirstChildElement(); setElement; setElement = setElement->NextSiblingElement()) {
+		if (!IsSliderSetElement(setElement))
+			continue;
+
+		std::string setname = AttributeText(setElement, "name");
 		setsInFile[setname] = setElement;
 		setsOrder.push_back(setname);
-		setElement = setElement->NextSiblingElement("SliderSet");
 	}
 }
 
@@ -769,7 +991,7 @@ void SliderSetFile::UpgradeLegacyFormat() {
 }
 
 void SliderSetFile::New(const std::string& newFileName) {
-	version = 1; // Most recent
+	version = 1; // Saving raises it when the file needs version 2
 	error = 0;
 	fileName = newFileName;
 	doc.Clear();
@@ -814,12 +1036,12 @@ void SliderSetFile::SetShapes(const std::string& set, std::vector<std::string>& 
 	XMLElement* setElement = setsInFile[set];
 	XMLElement* shapeElement = setElement->FirstChildElement("Shape");
 	while (shapeElement) {
-		outShapeNames.push_back(shapeElement->GetText());
+		outShapeNames.push_back(ElementText(shapeElement));
 		shapeElement = shapeElement->NextSiblingElement("Shape");
 	}
 }
 
-int SliderSetFile::GetSet(const std::string& setName, SliderSet& outSliderSet, bool appendNewSliders, const std::string& onlyShapeName) {
+int SliderSetFile::GetSet(const std::string& setName, SliderSet& outSliderSet, bool appendNewSliders, const std::string& onlyShapeName, bool resolveBase) {
 	XMLElement* setPtr;
 	if (!HasSet(setName))
 		return 1;
@@ -827,9 +1049,123 @@ int SliderSetFile::GetSet(const std::string& setName, SliderSet& outSliderSet, b
 	setPtr = setsInFile[setName];
 
 	int ret;
-	ret = outSliderSet.LoadSliderSet(setPtr, appendNewSliders, onlyShapeName);
+	if (!resolveBase || !setPtr->FirstChildElement("BaseProject")) {
+		ret = outSliderSet.LoadSliderSet(setPtr, appendNewSliders, onlyShapeName);
+	}
+	else {
+		SliderSet resolvedSet;
+		SliderSetResolver resolver(SliderSetResolver::ProjectPathOfFile(fileName));
+		resolver.Resolve(*this, setName, resolvedSet);
+
+		// The merged set is read like a saved one, so that loading into a set with sliders works the same
+		XMLDocument resolvedDoc;
+		XMLElement* resolvedRoot = resolvedDoc.NewElement("SliderSetInfo");
+		resolvedRoot->SetAttribute("version", CurrentVersion);
+		resolvedDoc.InsertEndChild(resolvedRoot);
+
+		XMLElement* resolvedElement = resolvedRoot->InsertNewChildElement(SliderSetElement);
+		resolvedSet.WriteSliderSet(resolvedElement);
+
+		ret = outSliderSet.LoadSliderSet(resolvedElement, appendNewSliders, onlyShapeName);
+		if (onlyShapeName.empty())
+			outSliderSet.SetResolveStatus(resolvedSet.GetResolveStatus());
+	}
+
+	if (onlyShapeName.empty() && version > CurrentVersion) {
+		SliderSetResolveStatus status = outSliderSet.GetResolveStatus();
+		status.newerVersion = true;
+		outSliderSet.SetResolveStatus(status);
+	}
 
 	return ret;
+}
+
+bool SliderSetFile::IsAddOn(const std::string& setName) {
+	auto setIt = setsInFile.find(setName);
+	return setIt != setsInFile.end() && std::strcmp(setIt->second->Name(), SliderSetAddOnElement) == 0;
+}
+
+std::string SliderSetFile::GetSetBaseProjectName(const std::string& setName) {
+	auto setIt = setsInFile.find(setName);
+	if (setIt == setsInFile.end())
+		return "";
+
+	XMLElement* baseElement = setIt->second->FirstChildElement("BaseProject");
+	if (!baseElement)
+		return "";
+
+	return AttributeText(baseElement, "ProjectName");
+}
+
+std::string SliderSetFile::GetSetBaseProjectID(const std::string& setName) {
+	auto setIt = setsInFile.find(setName);
+	if (setIt == setsInFile.end())
+		return "";
+
+	XMLElement* baseElement = setIt->second->FirstChildElement("BaseProject");
+	return baseElement ? AttributeText(baseElement, "ProjectID") : "";
+}
+
+std::string SliderSetFile::GetSetProjectID(const std::string& setName) {
+	auto setIt = setsInFile.find(setName);
+	return setIt != setsInFile.end() ? AttributeText(setIt->second, "id") : "";
+}
+
+void SliderSetFile::GetSetSourceFile(const std::string& setName, std::string& outDataFolder, std::string& outSourceFile) {
+	outDataFolder.clear();
+	outSourceFile.clear();
+
+	auto setIt = setsInFile.find(setName);
+	if (setIt == setsInFile.end())
+		return;
+
+	if (XMLElement* element = setIt->second->FirstChildElement("DataFolder"))
+		outDataFolder = ToOSSlashes(ElementText(element));
+	if (XMLElement* element = setIt->second->FirstChildElement("SourceFile"))
+		outSourceFile = ElementText(element);
+}
+
+bool SliderSetFile::SetMentions(const std::string& setName, const std::vector<std::string>& lowerNames) {
+	auto setIt = setsInFile.find(setName);
+	if (setIt == setsInFile.end())
+		return false;
+
+	auto mentions = [&lowerNames](const char* text) {
+		if (!text)
+			return false;
+
+		std::string lowerText = ToLower(text);
+		for (auto& name : lowerNames)
+			if (lowerText.find(name) != std::string::npos)
+				return true;
+
+		return false;
+	};
+
+	XMLElement* setElement = setIt->second;
+	for (XMLElement* source = setElement->FirstChildElement("SourceFile"); source; source = source->NextSiblingElement("SourceFile"))
+		if (mentions(source->GetText()))
+			return true;
+
+	for (XMLElement* slider = setElement->FirstChildElement("Slider"); slider; slider = slider->NextSiblingElement("Slider"))
+		for (XMLElement* data = slider->FirstChildElement("Data"); data; data = data->NextSiblingElement("Data"))
+			if (mentions(data->GetText()))
+				return true;
+
+	return false;
+}
+
+std::string SliderSetFile::FindSetByID(const std::string& projectID) {
+	if (projectID.empty())
+		return "";
+
+	for (auto& setName : setsOrder) {
+		auto setIt = setsInFile.find(setName);
+		if (setIt != setsInFile.end() && AttributeText(setIt->second, "id") == projectID)
+			return setName;
+	}
+
+	return "";
 }
 
 int SliderSetFile::GetAllSets(std::vector<SliderSet>& outAppendSets) {
@@ -853,12 +1189,12 @@ void SliderSetFile::GetSetOutputFilePath(const std::string& setName, std::string
 	XMLElement* setPtr = setsInFile[setName];
 	XMLElement* tmpElement = setPtr->FirstChildElement("OutputPath");
 	if (tmpElement)
-		outFilePath += ToOSSlashes(tmpElement->GetText());
+		outFilePath += ToOSSlashes(ElementText(tmpElement));
 
 	tmpElement = setPtr->FirstChildElement("OutputFile");
 	if (tmpElement) {
 		outFilePath += PathSepStr;
-		outFilePath += tmpElement->GetText();
+		outFilePath += ElementText(tmpElement);
 	}
 }
 
@@ -870,9 +1206,11 @@ int SliderSetFile::UpdateSet(SliderSet& inSliderSet) {
 		setPtr = setsInFile[setName];
 	}
 	else {
-		XMLElement* tmpElement = doc.NewElement("SliderSet");
+		XMLElement* tmpElement = doc.NewElement(SliderSetElement);
 		tmpElement->SetAttribute("name", setName.c_str());
 		setPtr = root->InsertEndChild(tmpElement)->ToElement();
+		setsInFile[setName] = setPtr;
+		setsOrder.push_back(setName);
 	}
 	inSliderSet.WriteSliderSet(setPtr);
 
@@ -907,6 +1245,20 @@ bool SliderSetFile::Save() {
 #endif
 
 	doc.SetBOM(true);
+
+	// Only files that use what version 2 added get it
+	if (version < 2) {
+		for (XMLElement* setElement = root->FirstChildElement(); setElement; setElement = setElement->NextSiblingElement()) {
+			if (!IsSliderSetElement(setElement))
+				continue;
+
+			if (std::strcmp(setElement->Name(), SliderSetAddOnElement) == 0 || setElement->FirstChildElement("BaseProject") || setElement->Attribute("id")) {
+				version = 2;
+				root->SetAttribute("version", version);
+				break;
+			}
+		}
+	}
 
 	const tinyxml2::XMLNode* firstChild = doc.FirstChild();
 	if (!firstChild || !firstChild->ToDeclaration())

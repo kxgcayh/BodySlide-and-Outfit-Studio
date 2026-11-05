@@ -24,7 +24,7 @@ int SliderData::LoadSliderData(XMLElement* element, bool genWeights) {
 
 	std::string dataFileStr = version >= 1 ? "Data" : "datafile";
 
-	name = element->Attribute("name");
+	name = AttributeText(element, "name");
 	if (element->Attribute("invert"))
 		bInvert = StringsEqualNInsens(element->Attribute("invert"), "true", 4);
 	else
@@ -67,22 +67,42 @@ int SliderData::LoadSliderData(XMLElement* element, bool genWeights) {
 	else
 		bClamp = false;
 
+	bInherited = element->BoolAttribute("inherited");
+	addOnName = AttributeText(element, "addon");
+	addOnID = AttributeText(element, "addonid");
+
 	if (bZap) {
 		wxStringTokenizer tokenizer(element->Attribute("zaptoggles"), ";");
 		while (tokenizer.HasMoreTokens())
 			zapToggles.push_back(tokenizer.GetNextToken().ToStdString());
 	}
 
+	// A zap can't also be a toggle
+	bToggle = !bZap && element->BoolAttribute("toggle");
+	toggleValue = element->FloatAttribute("togglevalue", 100.0f);
+	toggleSliders.clear();
+	if (bToggle) {
+		for (XMLElement* setsElement = element->FirstChildElement("Sets"); setsElement; setsElement = setsElement->NextSiblingElement("Sets")) {
+			ToggleTarget target;
+			target.slider = AttributeText(setsElement, "slider");
+			target.value = setsElement->FloatAttribute("value", 100.0f);
+			if (!target.slider.empty() && target.slider != name)
+				toggleSliders.push_back(std::move(target));
+		}
+	}
+
 	DiffInfo tmpDataFile;
 	XMLElement* datafile = element->FirstChildElement(dataFileStr.c_str());
 	while (datafile) {
 		datafile->SetName("Data");
-		tmpDataFile.targetName = datafile->Attribute("target");
+		tmpDataFile.targetName = AttributeText(datafile, "target");
 
 		if (datafile->Attribute("local"))
 			tmpDataFile.bLocal = StringsEqualNInsens(datafile->Attribute("local"), "true", 4);
 		else
 			tmpDataFile.bLocal = false;
+
+		tmpDataFile.bInherited = datafile->BoolAttribute("inherited");
 
 		if (datafile->Attribute("name"))
 			tmpDataFile.dataName = datafile->Attribute("name");
@@ -98,7 +118,8 @@ int SliderData::LoadSliderData(XMLElement* element, bool genWeights) {
 		datafile = datafile->NextSiblingElement(dataFileStr.c_str());
 		numData++;
 	}
-	if (numData == 0)
+	// Toggles need no data of their own
+	if (numData == 0 && !bToggle)
 		return 1;
 
 	return 0;

@@ -268,6 +268,8 @@ public:
 	void SetSize(uint32_t w, uint32_t h);
 	void GetSize(uint32_t& w, uint32_t& h);
 	void UpdateProjection();
+	// The projection and view matrices of the camera for a viewport with this aspect ratio
+	void ComputeCameraMatrices(float aspect, glm::mat4x4& outProjection, glm::mat4x4& outView) const;
 
 	void RenderFullScreenQuad(GLMaterial* renderShader, unsigned int w, unsigned int h);
 
@@ -293,6 +295,9 @@ public:
 					  const nifly::Vector3& directional2Dir);
 
 	void ProjectPointToScreen(const nifly::Vector3& p, int& x, int& y);
+	// Where a point in model space lands in an image of this size rendered with the current camera (RenderToImage),
+	// in pixels from the top left. False when the point is behind the camera.
+	bool ProjectPointToImage(const nifly::Vector3& p, uint32_t width, uint32_t height, float& x, float& y) const;
 
 	void GetPickRay(int ScreenX, int ScreenY, Mesh* m, nifly::Vector3& dirVect, nifly::Vector3& outNearPos);
 	Mesh* PickMesh(int ScreenX, int ScreenY);
@@ -393,6 +398,38 @@ public:
 	};
 
 	void RenderOneFrame();
+	// Draws the scene into the bound framebuffer, using the current viewport
+	void RenderScene();
+
+	// Renders the scene offscreen at the given size, as RGBA rows from top to bottom
+	bool RenderToImage(uint32_t width, uint32_t height, std::vector<uint8_t>& outRGBA, int samples = 4);
+
+	// The camera as a whole, to change it for a render and restore it afterwards
+	struct CameraState {
+		nifly::Vector3 camPos;
+		nifly::Vector3 camOffset;
+		nifly::Vector3 camRot;
+		nifly::Vector3 camRotOffset;
+		bool perspective = true;
+		float fov = 90.0f;
+	};
+
+	// Turns the camera to a named view: front, back, left, right, top or bottom. Keeps what it looks at.
+	bool SetViewPreset(const std::string& name);
+
+	// Looks at the center of the points, in model space, from far enough away that all of them fit.
+	// Keeps the camera rotation.
+	void FrameModelPoints(const std::vector<nifly::Vector3>& points, float margin = 1.1f);
+
+	CameraState GetCamera() const { return {camPos, camOffset, camRot, camRotOffset, perspective, mFov}; }
+	void SetCamera(const CameraState& camera) {
+		camPos = camera.camPos;
+		camOffset = camera.camOffset;
+		camRot = camera.camRot;
+		camRotOffset = camera.camRotOffset;
+		perspective = camera.perspective;
+		mFov = camera.fov;
+	}
 	void RenderToTexture(GLMaterial* renderShader);
 	void RenderMesh(Mesh* m);
 	void RenderMeshAsPoints(Mesh* m);
@@ -463,6 +500,33 @@ public:
 	}
 
 	bool GetWeightColors() const { return bWeightColors; }
+
+	// The display toggles as a whole, to change them for a render and restore them afterwards
+	struct DisplaySettings {
+		bool wireframe = false;
+		bool lighting = true;
+		bool textures = true;
+		bool mask = true;
+		bool weightColors = false;
+		bool vertexColors = false;
+	};
+
+	DisplaySettings GetDisplaySettings() const { return {bWireframe, bLighting, bTextured, bMaskVisible, bWeightColors, bVertexColors}; }
+
+	void SetDisplaySettings(const DisplaySettings& settings) {
+		bWireframe = settings.wireframe;
+		bLighting = settings.lighting;
+		bTextured = settings.textures;
+		bMaskVisible = settings.mask;
+		bWeightColors = settings.weightColors;
+		bVertexColors = settings.vertexColors;
+
+		for (auto& m : meshes)
+			UpdateShaders(m);
+
+		for (auto& o : overlays)
+			UpdateShaders(o);
+	}
 
 	void SetVertexColors(bool bVisible = true) {
 		bVertexColors = bVisible;

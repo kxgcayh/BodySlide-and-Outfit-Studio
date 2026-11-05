@@ -47,6 +47,12 @@
     <Filter Include="Program">
       <UniqueIdentifier>{82ef2505-7b08-4871-b498-b758d860f25c}</UniqueIdentifier>
     </Filter>
+    <Filter Include="MCP">
+      <UniqueIdentifier>{5d0c7a3e-2f41-4b8e-9c55-6a1e8f3b2d47}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Libraries\cpp-httplib">
+      <UniqueIdentifier>{9b7e4f12-3c6d-4a85-b1e0-2d8f6c4a9e31}</UniqueIdentifier>
+    </Filter>
     <Filter Include="Rendering">
       <UniqueIdentifier>{def5c486-38d5-46f3-87b8-5d17825c309e}</UniqueIdentifier>
     </Filter>
@@ -730,6 +736,12 @@
     <ClInclude Include="src\components\SliderSet.h">
       <Filter>Components</Filter>
     </ClInclude>
+    <ClInclude Include="src\components\SliderSetIndex.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\SliderSetInheritance.h">
+      <Filter>Components</Filter>
+    </ClInclude>
     <ClInclude Include="src\components\TweakBrush.h">
       <Filter>Components</Filter>
     </ClInclude>
@@ -745,6 +757,12 @@
     <ClInclude Include="src\components\MaskTransfer.h">
       <Filter>Components</Filter>
     </ClInclude>
+    <ClInclude Include="src\components\AddOnSliders.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\ConformOptions.h">
+      <Filter>Components</Filter>
+    </ClInclude>
     <ClInclude Include="src\components\Automorph.h">
       <Filter>Components</Filter>
     </ClInclude>
@@ -754,7 +772,40 @@
     <ClInclude Include="src\components\ClippingFixer.h">
       <Filter>Components</Filter>
     </ClInclude>
+    <ClInclude Include="src\components\ClothData.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\MaskOps.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\MeshAnalysis.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\MeshRefine.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\PoseMath.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\MeshDeform.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\PoseFit.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\SurfaceFit.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\TextureConvert.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\GameImport.h">
+      <Filter>Program</Filter>
+    </ClInclude>
     <ClInclude Include="src\files\ObjFile.h">
+      <Filter>Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\files\PhysicsXmlFile.h">
       <Filter>Files</Filter>
     </ClInclude>
     <ClInclude Include="src\files\ResourceLoader.h">
@@ -886,6 +937,21 @@
     <ClInclude Include="src\program\OutfitProject.h">
       <Filter>Program</Filter>
     </ClInclude>
+    <ClInclude Include="src\program\ProjectHost.h">
+      <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\ProjectOperations.h">
+      <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\BrushStrokeController.h">
+      <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\EditorState.h">
+      <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\program\BadBonesDialog.h">
+      <Filter>Program</Filter>
+    </ClInclude>
     <ClInclude Include="src\render\GLShader.h">
       <Filter>Rendering</Filter>
     </ClInclude>
@@ -938,6 +1004,12 @@
       <Filter>Utilities</Filter>
     </ClInclude>
     <ClInclude Include="src\utils\StringStuff.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\MainThreadDispatcher.h">
+      <Filter>Utilities</Filter>
+    </ClInclude>
+    <ClInclude Include="src\utils\TargetGame.h">
       <Filter>Utilities</Filter>
     </ClInclude>
     <ClInclude Include="lib\gli\core\coord.hpp">
@@ -1564,7 +1636,13 @@
     <ClInclude Include="src\program\AutomationDialog.h">
       <Filter>Program</Filter>
     </ClInclude>
+    <ClInclude Include="src\program\AutomationRunner.h">
+      <Filter>Program</Filter>
+    </ClInclude>
     <ClInclude Include="src\components\Automation.h">
+      <Filter>Components</Filter>
+    </ClInclude>
+    <ClInclude Include="src\components\AutomationJson.h">
       <Filter>Components</Filter>
     </ClInclude>
     <ClInclude Include="src\utils\ConfigDialogUtil.h">
@@ -1575,6 +1653,24 @@
     </ClInclude>
     <ClInclude Include="src\program\AddProjectDialog.h">
       <Filter>Program</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mcp\McpArgs.h">
+      <Filter>MCP</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mcp\McpProtocol.h">
+      <Filter>MCP</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mcp\McpServer.h">
+      <Filter>MCP</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mcp\McpSnapshots.h">
+      <Filter>MCP</Filter>
+    </ClInclude>
+    <ClInclude Include="src\mcp\OutfitStudioMcp.h">
+      <Filter>MCP</Filter>
+    </ClInclude>
+    <ClInclude Include="lib\cpp-httplib\httplib.h">
+      <Filter>Libraries\cpp-httplib</Filter>
     </ClInclude>
     <ClInclude Include="lib\gli\glm\ext\matrix_clip_space.hpp">
       <Filter>Libraries\gli\glm\ext</Filter>
@@ -2124,6 +2220,12 @@
     <ClCompile Include="src\components\SliderSet.cpp">
       <Filter>Components</Filter>
     </ClCompile>
+    <ClCompile Include="src\components\SliderSetIndex.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\SliderSetInheritance.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
     <ClCompile Include="src\components\TweakBrush.cpp">
       <Filter>Components</Filter>
     </ClCompile>
@@ -2136,16 +2238,58 @@
     <ClCompile Include="src\components\MaskTransfer.cpp">
       <Filter>Components</Filter>
     </ClCompile>
+    <ClCompile Include="src\components\ClothData.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\AddOnSliders.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
     <ClCompile Include="src\components\Automorph.cpp">
       <Filter>Components</Filter>
     </ClCompile>
     <ClCompile Include="src\components\ClippingFixer.cpp">
       <Filter>Components</Filter>
     </ClCompile>
+    <ClCompile Include="src\components\MaskOps.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\MeshAnalysis.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\MeshRefine.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\PoseMath.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\MeshDeform.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\PoseFit.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\SurfaceFit.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\TextureConvert.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\program\GameImport.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsFitting.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsTextures.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
     <ClCompile Include="src\components\DiffData.cpp">
       <Filter>Components</Filter>
     </ClCompile>
     <ClCompile Include="src\files\ObjFile.cpp">
+      <Filter>Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\files\PhysicsXmlFile.cpp">
       <Filter>Files</Filter>
     </ClCompile>
     <ClCompile Include="src\files\ResourceLoader.cpp">
@@ -2253,6 +2397,18 @@
     <ClCompile Include="src\program\OutfitProject.cpp">
       <Filter>Program</Filter>
     </ClCompile>
+    <ClCompile Include="src\program\ProjectHost.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\program\ProjectOperations.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\program\BrushStrokeController.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\program\BadBonesDialog.cpp">
+      <Filter>Program</Filter>
+    </ClCompile>
     <ClCompile Include="src\render\GLSurface.cpp">
       <Filter>Rendering</Filter>
     </ClCompile>
@@ -2292,6 +2448,9 @@
     <ClCompile Include="src\render\GLOffscreenBuffer.cpp">
       <Filter>Rendering</Filter>
     </ClCompile>
+    <ClCompile Include="src\render\MeshBuffers.cpp">
+      <Filter>Rendering</Filter>
+    </ClCompile>
     <ClCompile Include="src\components\NormalGenLayers.cpp">
       <Filter>Components</Filter>
     </ClCompile>
@@ -2305,6 +2464,9 @@
       <Filter>Utilities</Filter>
     </ClCompile>
     <ClCompile Include="src\utils\StringStuff.cpp">
+      <Filter>Utilities</Filter>
+    </ClCompile>
+    <ClCompile Include="src\utils\MainThreadDispatcher.cpp">
       <Filter>Utilities</Filter>
     </ClCompile>
     <ClCompile Include="src\utils\WxBuildConfigCheck.cpp">
@@ -2403,10 +2565,13 @@
     <ClCompile Include="src\program\AutomationDialog.cpp">
       <Filter>Program</Filter>
     </ClCompile>
-    <ClCompile Include="src\program\AutomationDialogExecute.cpp">
+    <ClCompile Include="src\program\AutomationRunner.cpp">
       <Filter>Program</Filter>
     </ClCompile>
     <ClCompile Include="src\components\Automation.cpp">
+      <Filter>Components</Filter>
+    </ClCompile>
+    <ClCompile Include="src\components\AutomationJson.cpp">
       <Filter>Components</Filter>
     </ClCompile>
     <ClCompile Include="src\program\SliderDataImportDialog.cpp">
@@ -2414,6 +2579,60 @@
     </ClCompile>
     <ClCompile Include="src\program\AddProjectDialog.cpp">
       <Filter>Program</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpProtocol.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpServer.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\OutfitStudioMcp.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsAutomation.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsAnalysis.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsArchives.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsBones.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsEdit.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsShapes.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsSliderFiles.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsMeasure.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsQuality.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpSnapshots.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsProject.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsSliders.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsView.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsGames.cpp">
+      <Filter>MCP</Filter>
+    </ClCompile>
+    <ClCompile Include="src\mcp\McpToolsGuides.cpp">
+      <Filter>MCP</Filter>
     </ClCompile>
     <ClCompile Include="src\render\GLDialog.cpp">
       <Filter>Rendering</Filter>

@@ -753,6 +753,8 @@
     <ClInclude Include="lib\TinyXML-2\tinyxml2.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="src\components\Anim.h" />
+    <ClInclude Include="src\components\AddOnSliders.h" />
+    <ClInclude Include="src\components\ConformOptions.h" />
     <ClInclude Include="src\components\Automorph.h" />
     <ClInclude Include="src\components\StarfieldSpace.h" />
     <ClInclude Include="src\components\BuildSelection.h" />
@@ -767,6 +769,8 @@
     <ClInclude Include="src\components\SliderManager.h" />
     <ClInclude Include="src\components\SliderPresets.h" />
     <ClInclude Include="src\components\SliderSet.h" />
+    <ClInclude Include="src\components\SliderSetIndex.h" />
+    <ClInclude Include="src\components\SliderSetInheritance.h" />
     <ClInclude Include="src\components\UndoState.h" />
     <ClInclude Include="src\physics\NiflyBullet.h" />
     <ClInclude Include="src\physics\Controller.h" />
@@ -831,6 +835,7 @@
     <ClInclude Include="src\utils\GameUtil.h" />
     <ClInclude Include="src\utils\StackTrace.h" />
     <ClInclude Include="src\utils\StringStuff.h" />
+    <ClInclude Include="src\utils\TargetGame.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="lib\FSEngine\FSBSA.cpp" />
@@ -864,6 +869,7 @@
     <ClCompile Include="lib\SOIL2\wfETC.c" />
     <ClCompile Include="lib\TinyXML-2\tinyxml2.cpp" />
     <ClCompile Include="src\components\Anim.cpp" />
+    <ClCompile Include="src\components\AddOnSliders.cpp" />
     <ClCompile Include="src\components\Automorph.cpp" />
     <ClCompile Include="src\components\BuildSelection.cpp" />
     <ClCompile Include="src\components\ClippingFixer.cpp" />
@@ -880,6 +886,8 @@
     <ClCompile Include="src\components\SliderManager.cpp" />
     <ClCompile Include="src\components\SliderPresets.cpp" />
     <ClCompile Include="src\components\SliderSet.cpp" />
+    <ClCompile Include="src\components\SliderSetIndex.cpp" />
+    <ClCompile Include="src\components\SliderSetInheritance.cpp" />
     <ClCompile Include="src\physics\Controller.cpp" />
     <ClCompile Include="src\physics\DebugDraw.cpp" />
     <ClCompile Include="src\physics\SystemBuilder.cpp" />
@@ -921,6 +929,7 @@
     <ClCompile Include="src\render\GLHDRiEnvironment.cpp" />
     <ClCompile Include="src\render\GLMaterial.cpp" />
     <ClCompile Include="src\render\GLOffscreenBuffer.cpp" />
+    <ClCompile Include="src\render\MeshBuffers.cpp" />
     <ClCompile Include="src\render\GLShader.cpp" />
     <ClCompile Include="src\render\GLSurface.cpp" />
     <ClCompile Include="src\ui\PreviewPanel.cpp" />

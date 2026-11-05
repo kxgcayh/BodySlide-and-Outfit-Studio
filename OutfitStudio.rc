@@ -60,8 +60,8 @@ IDI_ICON1               ICON                    "OutfitStudio.ico"
 //
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 6,0,0,0
- PRODUCTVERSION 6,0,0,0
+ FILEVERSION 6,1,0,0
+ PRODUCTVERSION 6,1,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -78,12 +78,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "ousnius"
             VALUE "FileDescription", "Outfit Studio"
-            VALUE "FileVersion", "6.0.0.0"
+            VALUE "FileVersion", "6.1.0.0"
             VALUE "InternalName", "Outfit Studio"
             VALUE "LegalCopyright", "Copyright (C) 2026"
             VALUE "OriginalFilename", "OutfitStudio.exe"
             VALUE "ProductName", "Outfit Studio"
-            VALUE "ProductVersion", "6.0.0.0"
+            VALUE "ProductVersion", "6.1.0.0"
         END
     END
     BLOCK "VarFileInfo"

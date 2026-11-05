@@ -89,6 +89,17 @@ TargetData& OSDataFile::GetDataDiffs() {
 	return dataDiffs;
 }
 
+std::vector<std::string> OSDataFile::GetDataNames() const {
+	std::vector<std::string> names;
+	names.reserve(dataDiffs.size() + dataDiffLists.size());
+	for (auto& data : dataDiffs)
+		names.push_back(data.first);
+	for (auto& data : dataDiffLists)
+		if (dataDiffs.find(data.first) == dataDiffs.end())
+			names.push_back(data.first);
+	return names;
+}
+
 std::unique_ptr<TargetDataDiffs>* OSDataFile::GetDataDiff(const std::string& dataName) {
 	MaterializeDataDiff(dataName);
 
@@ -322,7 +333,7 @@ int DiffDataSets::SaveSet(const std::string& name, const std::string& target, co
 	return 0;
 }
 
-bool DiffDataSets::SaveData(const std::map<std::string, std::map<std::string, std::string>>& osdNames) {
+bool DiffDataSets::SaveData(const std::map<std::string, std::map<std::string, std::string>>& osdNames, const std::map<std::string, std::set<std::string>>* keepData) {
 	for (auto& osd : osdNames) {
 		OSDataFile osdFile;
 		for (auto& dataNames : osd.second) {
@@ -334,6 +345,26 @@ bool DiffDataSets::SaveData(const std::map<std::string, std::map<std::string, st
 				continue;
 
 			osdFile.SetDataDiff(dataNames.first, *data);
+		}
+
+		if (keepData) {
+			auto keep = keepData->find(osd.first);
+			if (keep != keepData->end()) {
+				std::map<std::string, std::string> keepNames;
+				auto& newData = osdFile.GetDataDiffs();
+				for (auto& dataName : keep->second)
+					if (newData.find(dataName) == newData.end())
+						keepNames[dataName] = "";
+
+				OSDataFile oldFile;
+				if (!keepNames.empty() && oldFile.Read(osd.first, &keepNames)) {
+					for (auto& dataName : keepNames) {
+						auto oldData = oldFile.GetDataDiff(dataName.first);
+						if (oldData && *oldData)
+							osdFile.SetDataDiff(dataName.first, **oldData);
+					}
+				}
+			}
 		}
 
 		if (!osdFile.Write(osd.first))
@@ -606,6 +637,27 @@ void DiffDataSets::InsertVertexIndices(const std::string& target, const std::vec
 		if (diffSet)
 			ApplyIndexMapToMapKeys(*diffSet, indexExpand, static_cast<int>(indices.size()));
 	}
+}
+
+DiffDataSets::DiffDataSets(const DiffDataSets& other) {
+	*this = other;
+}
+
+DiffDataSets& DiffDataSets::operator=(const DiffDataSets& other) {
+	if (this == &other)
+		return *this;
+
+	namedSet.clear();
+	for (auto& set : other.namedSet) {
+		DataSet& copy = namedSet[set.first];
+		copy.target = set.second.target;
+		if (set.second.diffs)
+			copy.diffs = std::make_unique<TargetDataDiffs>(*set.second.diffs);
+		if (set.second.linearDiffs)
+			copy.linearDiffs = std::make_unique<TargetDataDiffList>(*set.second.linearDiffs);
+	}
+
+	return *this;
 }
 
 void DiffDataSets::ClearSet(const std::string& name) {

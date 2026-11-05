@@ -43,6 +43,17 @@ public:
 	~Automorph();
 
 	void ClearResultDiff() { resultDiffData.Clear(); }
+
+	// The calculated morphs and the data names they are stored under, for snapshots
+	void SaveResults(DiffDataSets& outDiffs, std::unordered_map<std::string, std::string>& outDataNames) const {
+		outDiffs = resultDiffData;
+		outDataNames = targetSliderDataNames;
+	}
+
+	void RestoreResults(const DiffDataSets& diffs, const std::unordered_map<std::string, std::string>& dataNames) {
+		resultDiffData = diffs;
+		targetSliderDataNames = dataNames;
+	}
 	void ClearSourceShapes();
 
 	void RenameResultDiffData(const std::string& shape, const std::string& oldName, const std::string& newName);
@@ -75,6 +86,7 @@ public:
 	void InsertVertexIndices(const std::string& target, const std::vector<uint16_t>& indices);
 
 	void ClearProximityCache();
+	// maskIndices: vertices of the reference to leave out of the results, e.g. masked ones
 	void BuildProximityCache(const std::string& shapeName, float proximityRadius = 10.0f, const std::set<uint16_t>* maskIndices = nullptr);
 
 	// shapeName = name of the mesh to morph (eg "IronArmor") also known as target name.

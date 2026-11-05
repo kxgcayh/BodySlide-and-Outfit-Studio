@@ -17,6 +17,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 #pragma once
 
+#include "../components/AddOnSliders.h"
 #include "../components/Anim.h"
 #include "../components/BuildSelection.h"
 #include "../components/ClippingFixer.h"
@@ -30,6 +31,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include "../physics/PumpClock.h"
 #include "../utils/ConfigurationManager.h"
 #include "../utils/Log.h"
+#include "../utils/TargetGame.h"
 #include "GroupManager.h"
 #include "PresetSaveDialog.h"
 #include "PreviewWindow.h"
@@ -62,6 +64,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <memory>
 #include <string>
 #include <thread>
@@ -69,8 +72,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <unordered_set>
 #include <vector>
 
-
-enum TargetGame { FO3, FONV, SKYRIM, FO4, SKYRIMSE, FO4VR, SKYRIMVR, FO76, OB, SF };
 
 // Marks favorites in the outfit, preset and animation lists and on their buttons
 constexpr const char* FavoriteStar = "\xE2\x98\x85";
@@ -105,6 +106,8 @@ class BodySlideApp : public wxApp {
 	bool cmdPresetResolved = false;
 	bool cmdPresetPending = false;
 	bool cmdTri = false;
+	bool cmdQuiet = false; // Command-line builds log instead of asking or showing dialogs, and don't save build choices.
+	bool cmdConformAddOns = false; // Command-line builds conform the add-on sliders of the body to outfits.
 	std::vector<std::string> cmdPreviewNifs;
 	bool cmdPreviewMode = false;
 
@@ -119,6 +122,34 @@ private:
 	DiffDataSets referenceDiffData;
 	std::string referenceShapeName;
 
+	/* Add-ons */
+public:
+	// What loading a project did with add-ons
+	struct ProjectAddOns {
+		std::vector<StackedAddOn> stacked;	   // Add-ons whose sliders were added to the project
+		std::vector<StackedAddOn> baseStacked; // Variants: add-ons of the base projects whose sliders were added
+		std::vector<std::string> conformed;	   // Add-ons of the body whose sliders were conformed to it
+		std::string conformBody;			   // The body they belong to
+		std::vector<std::string> missing;	   // Add-ons that sliders were made for, but that aren't installed
+		std::vector<std::string> warnings;
+	};
+
+private:
+	ProjectCatalog projectCatalog;
+	bool conformAddOnSliders = false; // Conform the add-on sliders of the body to outfits that don't have them
+	ProjectAddOns activeAddOns;
+	// Bodies loaded to conform their add-on sliders, by file, set and shape. Null if it has none.
+	std::map<std::string, std::shared_ptr<ConformBody>> conformBodies;
+	std::mutex conformBodiesMutex;
+	// Projects with conformed add-on sliders, so that they aren't conformed again each time they are shown
+	std::map<std::string, std::pair<SliderSet, ProjectAddOns>> conformedSets;
+	// Slider values that the next activated outfit keeps, by name: small and big value
+	std::map<std::string, std::pair<float, float>> pendingSliderValues;
+
+	std::shared_ptr<ConformBody> GetConformBody(const ConformBodyRef& ref, std::vector<std::string>& warnings);
+	// Logs the warnings and the vertex counts of stacked add-ons that don't fit the NIF anymore
+	void LogProjectAddOns(const SliderSet& set, const ProjectAddOns& addOns, nifly::NifFile* nif = nullptr);
+
 	/* Localization */
 	wxLocale* locale = nullptr;
 	int language = 0;
@@ -131,6 +162,7 @@ private:
 	std::map<std::string, std::string, case_insensitive_compare> outfitNameSource; // All currently defined outfits.
 	std::vector<std::string> outfitNameOrder;									   // All currently defined outfits, in their order of appearance.
 	std::vector<std::string> outfitHasZaps;										   // All currently defined outfits that have visible zaps.
+	std::map<std::string, std::pair<std::string, bool>, case_insensitive_compare> outfitBaseProjects; // Variants and add-ons: base project name, and whether it's an add-on
 	std::map<std::string, std::vector<std::string>> groupMembers;				   // All currently defined groups.
 	std::map<std::string, std::string> groupAlias;								   // Group name aliases.
 	std::vector<std::string> ungroupedOutfits;									   // Outfits without a group.
@@ -234,9 +266,16 @@ private:
 	// Moves the skeleton to a different pose or frame in one go and shows it
 	void JumpPreviewSkeleton();
 	// Skins the shape's morphed vertices with the current skeleton pose, or the
-	// simulated bone transforms if a simulation drives the shape.
-	void ApplyPreviewSkinning(size_t projectIdx, const std::string& shapeName, std::vector<nifly::Vector3>& verts);
-	void ApplyPreviewReferenceSkinning(std::vector<nifly::Vector3>& verts);
+	// simulated bone transforms if a simulation drives the shape. outPoseRotations
+	// gets the rotations for PreviewPanel::UpdateMeshes, and stays empty if the
+	// shape wasn't skinned or its mesh doesn't need them.
+	void ApplyPreviewSkinning(size_t projectIdx,
+							  const std::string& shapeName,
+							  std::vector<nifly::Vector3>& verts,
+							  std::vector<nifly::Matrix3>* outPoseRotations = nullptr);
+	void ApplyPreviewReferenceSkinning(std::vector<nifly::Vector3>& verts, std::vector<nifly::Matrix3>* outPoseRotations = nullptr);
+	// The pose rotation output for a shape, which is null when its mesh has no use for them
+	std::vector<nifly::Matrix3>* PoseRotationsFor(const std::string& shapeName, std::vector<nifly::Matrix3>* outPoseRotations);
 	// Shows the loose NIFs posed, or as stored without a pose. Doesn't render.
 	void UpdatePreviewLooseMeshes();
 	// Skins all cached morphed shapes again, or only those a simulation drives
@@ -282,6 +321,8 @@ public:
 	// Pushes the True PBR render setting to the preview, if one is open, rebuilding its meshes when
 	// the setting actually changed - unlike Complex Material this one selects the shader files.
 	void ApplyPBRSetting();
+	// Textures the preview didn't find are looked for again after the data folders or archives changed
+	void RetryMissingTextures();
 
 	std::string GetOutputDataPath() const;
 	SliderSet& GetActiveSet() { return projects[0]->sliderSet; }
@@ -290,12 +331,32 @@ public:
 
 	int AddProjectSliders(const std::string& projectFile, const std::string& setName);
 
+	// Loads a set of a project file with the sliders of its add-ons, and with 'conform' the conformed add-on sliders of
+	// its body. Returns non-zero if the file or set couldn't be loaded. Safe to call on several threads at once.
+	int LoadProjectSet(const std::string& fileName, const std::string& setName, SliderSet& outSet, bool conform, ProjectAddOns& outAddOns, nifly::NifFile* nif = nullptr);
+	// Adds the sliders of add-ons to a loaded set. 'nif' is the set's NIF file if it's loaded already.
+	void AddProjectAddOns(SliderSet& set, bool conform, ProjectAddOns& outAddOns, nifly::NifFile* nif = nullptr);
+	const ProjectAddOns& GetActiveAddOns() const { return activeAddOns; }
+	const ProjectCatalog& GetProjectCatalog() const { return projectCatalog; }
+	bool GetConformAddOnSliders() const { return conformAddOnSliders; }
+	// Turns conforming of add-on sliders on or off, and loads the outfit again
+	void SetConformAddOnSliders(bool conform);
+	// Loads a NIF file with the external geometry of Starfield NIFs
+	static bool LoadNifFile(const std::string& fileName, nifly::NifFile& nif);
+
 	void InitLanguage();
 
 	void LoadData();
 	void CharHook(wxKeyEvent& event);
 
 	bool OutfitExists(const std::string& name) const { return outfitNameSource.find(name) != outfitNameSource.end(); }
+	// Name of the outfit's base project, empty for a project without one. 'addOn' tells whether it's an add-on or a variant.
+	std::string GetOutfitBaseProject(const std::string& name, bool* addOn = nullptr) const {
+		auto base = outfitBaseProjects.find(name);
+		if (addOn)
+			*addOn = base != outfitBaseProjects.end() && base->second.second;
+		return base != outfitBaseProjects.end() ? base->second.first : "";
+	}
 	bool PresetExists(const std::string& name);
 
 	void LoadFavorites();
@@ -349,8 +410,14 @@ public:
 	void RefreshOutfitList();
 
 	void RefreshSliders();
+	// Shows the sliders that ticked toggles hold at the values they set, and gives them back to the user once unticked
+	void UpdateToggledSliders();
+	// Zaps that zap the mesh, with the toggles applied
+	std::vector<bool> ZappedSliders();
+	// Whether a toggle sets zaps that change the mesh
+	bool ToggleSetsZaps(const wxString& sliderName);
 
-	void ActivateOutfit(const std::string& outfitName);
+	void ActivateOutfit(const std::string& name);
 	void ActivatePreset(const std::string& presetName, const bool updatePreview = true);
 
 	std::vector<std::string> GetConflictingOutfits() {
@@ -359,6 +426,8 @@ public:
 		return outFileCount.find(GetActiveSet().GetOutputFilePath())->second;
 	}
 
+	// Projects that are variants or add-ons of the outfit.
+	std::vector<std::string> GetDerivedProjects(const std::string& outfitName);
 	void DeleteOutfit(const std::string& outfitName);
 	void DeletePreset(const std::string& presetName);
 
@@ -498,6 +567,7 @@ public:
 
 	float GetSliderValue(const wxString& sliderName, bool isLo);
 	bool IsUVSlider(const wxString& sliderName);
+	bool IsToggleSlider(const wxString& sliderName);
 	std::vector<std::string> GetSliderZapToggles(const wxString& sliderName);
 	void SetSliderValue(const wxString& sliderName, bool isLo, float val);
 	void SetSliderChanged(const wxString& sliderName, bool isLo);
@@ -527,6 +597,14 @@ static const wxCmdLineEntryDesc g_cmdLineDesc[] = {{wxCMD_LINE_OPTION, "gbuild",
 													"path to a preset XML file optionally followed by '?' and a preset name, defaults to last used preset",
 													wxCMD_LINE_VAL_STRING},
 												   {wxCMD_LINE_SWITCH, "tri", "trimorphs", "enables tri morph output for the specified build"},
+												   {wxCMD_LINE_SWITCH,
+													"conformaddons",
+													"conformaddons",
+													"conforms the sliders of the body's add-ons to outfits that don't have them, for the specified build"},
+												   {wxCMD_LINE_SWITCH,
+													"q",
+													"quiet",
+													"builds without dialogs: conflicting outputs take the saved or first choice without saving it, failures are only logged"},
 												   {wxCMD_LINE_OPTION, "preview", "preview", "open the specified nif files in preview mode", wxCMD_LINE_VAL_STRING},
 												   wxCMD_LINE_DESC_END};
 
@@ -566,13 +644,22 @@ public:
 	void Destroy();
 };
 
+// How a slider is marked in the slider list
+enum class SliderMarker {
+	None,
+	AddOn,		  // From an add-on
+	AutoConformed // Conformed from an add-on of the body when loading
+};
+
 class SliderDisplay {
 	bool isCreated = false;
 
 public:
 	bool isShown = false;
-	bool isZap = false;
+	bool isZap = false; // Shown as a check box, for zaps and toggles
 	bool oneSize = false;
+	bool isForced = false; // Held at a value by a ticked toggle
+	wxString markerTip;
 
 	std::string sliderName;
 	std::string displayName;
@@ -594,6 +681,10 @@ public:
 	bool Create(
 		wxScrolledWindow* scrollWindow, wxSizer* sliderLayout, const std::string& name, const std::string& category, const std::string& display, int minValue, int maxValue, bool pIsZap, bool pOneSize = false);
 	void Show(bool show = true);
+	// Colors the labels and gives the slider a tooltip, which pooled sliders take over otherwise
+	void SetMarker(SliderMarker marker, const wxString& tip);
+	// Holds the slider at the value that the named toggle sets, or gives it back with an empty name
+	void SetForcedBy(const wxString& toggleName);
 };
 
 class SliderDisplayPool {
@@ -618,6 +709,8 @@ public:
 	wxTimer delayLoad;
 
 	wxChoice* outfitChoice = nullptr;
+	wxStaticText* lblOutfitBase = nullptr;
+	wxStaticText* lblOutfitAddOns = nullptr;
 	wxChoice* presetChoice = nullptr;
 	wxButton* btnFavoriteOutfit = nullptr;
 	wxButton* btnFavoritePreset = nullptr;
@@ -658,7 +751,13 @@ public:
 	void HideSlider(SliderDisplay* slider);
 	void ShowLowColumn(bool show);
 	void AddCategorySliderUI(const std::string& name, const std::vector<std::string>& sliders, bool enabled, bool oneSize);
-	void AddSliderGUI(const std::string& name, const std::string& display, const std::string& categoryName, bool isZap, bool oneSize = false);
+	void AddSliderGUI(const std::string& name,
+					  const std::string& display,
+					  const std::string& categoryName,
+					  bool isZap,
+					  bool oneSize = false,
+					  SliderMarker marker = SliderMarker::None,
+					  const wxString& markerTip = wxEmptyString);
 
 	SliderDisplay* GetSliderDisplay(const std::string& name) {
 		if (sliderDisplays.find(name) != sliderDisplays.end())
@@ -676,6 +775,10 @@ public:
 
 	void ClearPresetList();
 	void ClearOutfitList();
+	// Shows under the outfit list what the loaded project is an add-on or variant of
+	void ShowOutfitBaseProject(const SliderSet* set);
+	// Shows next to it what add-ons the loaded project has sliders of, and which ones it misses
+	void ShowOutfitAddOns(const BodySlideApp::ProjectAddOns* addOns);
 	void ClearSliderGUI();
 	void SetPresetChanged(bool changed = true);
 
@@ -701,6 +804,7 @@ private:
 
 	void OnEnterSliderWindow(wxMouseEvent& event);
 	wxString FavoriteChoiceLabel(const std::string& name, bool favorite) const;
+	wxString OutfitChoiceLabel(const std::string& name) const;
 	bool SelectChoiceName(wxChoice* choice, const std::vector<std::string>& names, const std::string& selectItem) const;
 	void SetFavoriteButtonBitmap(wxButton* button, bool favorite) const;
 	void UpdateFavoriteButtons();
@@ -755,6 +859,7 @@ private:
 	void OnHighToLow(wxCommandEvent& event);
 	void OnLowToHigh(wxCommandEvent& event);
 	void OnBuildBodies(wxCommandEvent& event);
+	void OnConformAddOns(wxCommandEvent& event);
 	void OnBatchBuild(wxCommandEvent& event);
 	void OnBatchBuildContext(wxMouseEvent& event);
 	void OnBatchBuildSelect(wxCommandEvent& event);

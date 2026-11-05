@@ -36,6 +36,7 @@ enum class AutomationStepType {
 	SaveProject,
 	ImportFile,
 	ImportSliderData,
+	ImportFromGame,
 	AddProject,
 	ClearProject,
 	ClearReference,
@@ -61,6 +62,7 @@ enum class AutomationStepType {
 	ResetTransforms,
 	SeparateVertices,
 	SymmetrizeVertices,
+	SmoothVertices,
 	TransformShape,
 	SetGeometryProperties,
 	SetExtraData,
@@ -81,16 +83,19 @@ enum class AutomationStepType {
 	InvertMask,
 	LoadMask,
 	MaskAsymmetric,
+	MaskBox,
+	MaskCovered,
 	MaskBoneWeighted,
 	MaskSliderAffected,
 	MaskWeighted,
 	SaveMask,
+	SmoothMask,
 	RemoveUnusedNodes,
 	SetVariable,
 	LogMessage
 };
 
-constexpr int AutomationStepTypeCount = 65;
+constexpr int AutomationStepTypeCount = 70;
 static_assert(static_cast<int>(AutomationStepType::LogMessage) + 1 == AutomationStepTypeCount,
 	"AutomationStepTypeCount must match the number of enum values");
 
@@ -162,6 +167,7 @@ struct AutomationStep {
 	AutomationStepType type = AutomationStepType::LoadReference;
 	std::vector<std::string> targetMeshes;
 	bool targetRegex = false;
+	bool targetReference = false; // Regex patterns can match the reference shape too
 
 	// LoadReference / AddProject params
 	std::string refSourceFile;
@@ -171,6 +177,7 @@ struct AutomationStep {
 	bool refMergeSliders = true;
 	bool refMergeZaps = true;
 	bool refAppendNewSliders = true;
+	bool refLoadAddOns = false; // LoadReference: also load the sliders of the reference's installed add-ons
 
 	// SetSliderValues params
 	std::vector<std::string> setSliderNames;
@@ -195,6 +202,7 @@ struct AutomationStep {
 	float weightProximityRadius = 10.0f;
 	int weightMaxResults = 10;
 	std::vector<std::string> weightBoneList;
+	bool weightNormalize = false; // Make the weights of each vertex add up to 1 afterwards
 
 	// ImportSliderData params
 	std::string sliderDataFile;
@@ -207,6 +215,14 @@ struct AutomationStep {
 	bool importFromFolder = false;
 	bool importBeforeBatch = false;
 	bool importTriSliders = true;
+
+	// ImportFromGame params
+	std::string gameImportFile; // NIF, or slider set file of another BodySlide folder
+	std::string gameImportSet;
+	std::vector<std::string> gameImportDataFolders;
+	std::vector<std::string> gameImportShapes;
+	std::vector<std::string> gameImportSkipShapes;
+	std::string gameImportSliders = "local";
 
 	// TransformShape params
 	float moveX = 0.0f, moveY = 0.0f, moveZ = 0.0f;
@@ -258,6 +274,7 @@ struct AutomationStep {
 	// RenameShape params
 	std::string renameOldName;
 	std::string renameNewName;
+	bool renameSkipIfMissing = false; // Continue without renaming if the shape doesn't exist
 
 	// DeleteSlider params
 	std::vector<std::string> deleteSliderNames;
@@ -266,6 +283,7 @@ struct AutomationStep {
 	// SetReferenceShape params
 	std::string setRefShapeName;
 	bool setRefUnset = false;
+	bool setRefSkipIfMissing = false; // Keep the current reference if the shape doesn't exist
 
 	// SaveProject params
 	std::string saveName;
@@ -301,6 +319,7 @@ struct AutomationStep {
 	// ExportFile params
 	std::string exportFilePath;
 	bool exportWithRef = true;
+	bool exportHeadTri = false;         // TRI: head morphs of the one target shape instead of the body morphs
 	bool exportUseOriginalPath = false; // Use original file path from batch mode
 	std::string exportPrefix;
 	std::string exportSuffix;
@@ -368,6 +387,7 @@ struct AutomationStep {
 	std::string mergeSourceShape;
 	std::string mergeTargetShape;
 	bool mergeDeleteSource = false;
+	bool mergeSkipIfMissing = false; // Continue without merging if either shape doesn't exist
 
 	// SymmetrizeVertices / MaskAsymmetric params
 	bool asymDoPositions = true;
@@ -386,6 +406,30 @@ struct AutomationStep {
 	// ClearSliderData params
 	std::vector<std::string> clearSliderNames; // Empty = every slider of the project
 	bool clearSliderUseMask = true;
+
+	// SmoothVertices params
+	int smoothIterations = 10;
+	float smoothStrength = 0.1f;
+	std::vector<std::string> smoothFollowShapes; // Shapes that move with the smoothed ones (trim lying on them)
+	float smoothFollowRadius = 1.5f;
+	bool smoothKeepBorders = true; // Open mesh edges stay in place
+
+	// MaskBox params
+	float maskBoxMinX = -100000.0f;
+	float maskBoxMinY = -100000.0f;
+	float maskBoxMinZ = -100000.0f;
+	float maskBoxMaxX = 100000.0f;
+	float maskBoxMaxY = 100000.0f;
+	float maskBoxMaxZ = 100000.0f;
+	bool maskBoxKeepOthers = false;
+
+	// MaskCovered params
+	std::vector<std::string> maskCoverShapes; // Empty = every outfit shape that isn't a target
+	float maskCoverOutside = 2.0f;			  // How far in front of a vertex the covering surface may be
+	float maskCoverInside = 1.0f;			  // How far behind it, where the surface sinks in
+
+	// SmoothMask params
+	int maskSmoothCount = 1;
 
 	// GrowShrinkMask params
 	int maskGrowShrinkMode = 0;  // 0 = grow, 1 = shrink
@@ -627,3 +671,18 @@ public:
 	// Substitute placeholders like {{KEY}} in all string fields
 	void SubstitutePlaceholders(const std::map<std::string, std::string>& vars);
 };
+
+// Texture slots of a shader, as Set Texture Paths steps name them
+struct AutomationTexturePathDef {
+	int index;
+	const char* name;
+	const char* label;
+};
+
+const std::vector<AutomationTexturePathDef>& GetAutomationTexturePathDefs();
+const AutomationTexturePathDef* FindAutomationTexturePathDef(int index);
+// Index of a texture slot by name or label, or -1
+int AutomationTexturePathIndexForName(const std::string& name);
+// Index of a texture path entry, from its index or else its name
+int ResolveAutomationTexturePathIndex(const AutomationStep::TexturePath& path);
+std::string AutomationTexturePathNameForIndex(int index);
