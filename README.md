@@ -36,6 +36,7 @@ BodySlide and Outfit Studio, a tool to convert, create, and customize outfits an
 * [OpenGL](https://www.opengl.org/)
 * [OpenGL Image (GLI)](https://github.com/g-truc/gli)
 * [Simple OpenGL Image Library 2 (SOIL2)](https://github.com/SpartanJ/SOIL2)
+* [bcdec](https://github.com/iOrange/bcdec) (BC7 decoding where the GPU driver has no BPTC)
 * [half - IEEE 754-based half-precision floating point library](https://half.sourceforge.net/)
 * [Miniball](https://github.com/hbf/miniball)
 * [LZ4(F)](https://github.com/lz4/lz4)

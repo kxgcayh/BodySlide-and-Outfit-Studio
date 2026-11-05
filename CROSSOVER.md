@@ -25,6 +25,15 @@ When running Windows versions of BodySlide and Outfit Studio under CrossOver or 
 2. **Fixed-Function Shader Cleanup**:
    Legacy fixed-function OpenGL calls (`glShadeModel`) that are illegal in core profiles on macOS are guarded out.
 
+3. **BC7 Textures (black meshes under MO2)**:
+   Apple's OpenGL 4.1, which CrossOver exposes, has no `GL_ARB_texture_compression_bptc`. A BC7 DDS (DXGI 98/99, e.g. VRAMr output or most modern body textures) fails to upload and the mesh renders solid black. Run through MO2, the virtual file system resolves textures to those mod files, so meshes that look fine outside MO2 go black inside it. When BPTC is missing, `ResourceLoader::GLI_create_texture` now decodes BC7 to RGBA8 on the CPU (`lib/bcdec/bcdec.h`). Drivers with BPTC keep the compressed path.
+
+4. **Viewport Lag (vertical sync)**:
+   Under Wine on macOS `SwapBuffers` blocks until the display refresh (measured 11.6 ms of a 12 ms frame), and every mouse move renders a frame on the GUI thread. When `wine_get_version` is exported by `ntdll.dll`, `GLSurface::Initialize` calls `wglSwapIntervalEXT(0)`; measured swap time drops to 0.4 ms. Native Windows is unchanged.
+
+5. **Local clang-cl Build**:
+   `OutfitStudio.rc`, `BodySlide.rc` and `Resource.h` are plain ASCII (clang's resource preprocessor rejects UTF-16), and the manifests are added as CMake sources so `lld-link` embeds them (it rejects `/MANIFESTINPUT` without `/MANIFEST:EMBED`).
+
 ---
 
 ## 3. Build Instructions
