@@ -12,9 +12,59 @@ See the included LICENSE file
 #include <wx/filename.h>
 #include <wx/log.h>
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
+
+#define BCDEC_IMPLEMENTATION
+#include "bcdec/bcdec.h"
 
 extern ConfigurationManager Config;
+
+namespace {
+// Apple's OpenGL 4.1 (macOS, CrossOver/Wine) has no BPTC: a BC7 upload fails and the texture samples black
+bool IsBPTCSupported() {
+	static const bool supported = IsExtensionSupported("GL_ARB_texture_compression_bptc");
+	return supported;
+}
+
+bool IsBC7(gli::format format) {
+	return format == gli::FORMAT_RGBA_BP_UNORM_BLOCK16 || format == gli::FORMAT_RGBA_BP_SRGB_BLOCK16;
+}
+
+gli::texture DecodeBC7(const gli::texture& src) {
+	const gli::format format = gli::is_srgb(src.format()) ? gli::FORMAT_RGBA8_SRGB_PACK8 : gli::FORMAT_RGBA8_UNORM_PACK8;
+	gli::texture dst(src.target(), format, src.extent(), src.layers(), src.faces(), src.levels(), src.swizzles());
+
+	uint8_t block[4 * 4 * 4];
+	for (size_t layer = 0; layer < src.layers(); ++layer) {
+		for (size_t face = 0; face < src.faces(); ++face) {
+			for (size_t level = 0; level < src.levels(); ++level) {
+				const auto extent = src.extent(level);
+				const int w = extent.x;
+				const int h = extent.y;
+				const uint8_t* in = static_cast<const uint8_t*>(src.data(layer, face, level));
+				uint8_t* out = static_cast<uint8_t*>(dst.data(layer, face, level));
+
+				for (int z = 0; z < extent.z; ++z) {
+					for (int by = 0; by < h; by += 4) {
+						for (int bx = 0; bx < w; bx += 4, in += BCDEC_BC7_BLOCK_SIZE) {
+							bcdec_bc7(in, block, 4 * 4);
+
+							// Mips smaller than a block only keep the part of it that's inside the image
+							const int cols = std::min(4, w - bx);
+							for (int y = 0; y < 4 && by + y < h; ++y)
+								std::memcpy(out + ((static_cast<size_t>(z) * h + by + y) * w + bx) * 4, block + y * 16, cols * 4);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return dst;
+}
+} // namespace
 
 ResourceLoader::ResourceLoader() {}
 
@@ -177,6 +227,11 @@ GLuint ResourceLoader::GLI_create_texture(gli::texture& texture, GLuint textureI
 			extChecked = true;
 		}
 		return textureID;
+	}
+
+	if (IsBC7(texture.format()) && !IsBPTCSupported()) {
+		gli::texture decoded = DecodeBC7(texture);
+		return GLI_create_texture(decoded, textureID, isSRGB, isSigned);
 	}
 
 	gli::gl glProfile(gli::gl::PROFILE_GL33);

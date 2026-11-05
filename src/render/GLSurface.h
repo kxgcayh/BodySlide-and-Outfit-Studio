@@ -87,6 +87,7 @@ private:
 
 	void InitLighting();
 	void InitGLExtensions();
+	void DisableVSyncUnderWine();
 	int InitGLSettings();
 
 public:

@@ -124,7 +124,24 @@ int GLSurface::Initialize(wxGLCanvas* can, wxGLContext* ctx) {
 	wxLogMessage(wxString::Format("-> Version:  '%s'", wxString(glGetString(GL_VERSION))));
 
 	InitGLExtensions();
+	DisableVSyncUnderWine();
 	return InitGLSettings();
+}
+
+void GLSurface::DisableVSyncUnderWine() {
+#ifdef _WIN32
+	// Under Wine on macOS (CrossOver) SwapBuffers blocks until the display refresh, about 12 ms of
+	// every frame, and every mouse move renders a frame on the GUI thread: the UI lags behind the
+	// mouse. Rendering only happens on demand here, so not waiting for the refresh costs nothing.
+	static const bool underWine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
+	if (!underWine)
+		return;
+
+	using SwapIntervalProc = BOOL(WINAPI*)(int);
+	auto wglSwapIntervalEXT = reinterpret_cast<SwapIntervalProc>(wglGetProcAddress("wglSwapIntervalEXT"));
+	if (wglSwapIntervalEXT && wglSwapIntervalEXT(0))
+		wxLogMessage("Running under Wine: vertical sync disabled for the viewport.");
+#endif
 }
 
 void GLSurface::InitGLExtensions() {
