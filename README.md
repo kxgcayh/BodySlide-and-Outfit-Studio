@@ -1,29 +1,43 @@
-BodySlide and Outfit Studio
-===========================
+BodySlide and Outfit Studio (macOS CrossOver / Wine Edition)
+============================================================
 
-BodySlide and Outfit Studio, a tool to convert, create, and customize outfits and bodies for The Elder Scrolls, Fallout and Starfield.
+A tool to convert, create, and customize outfits and bodies for The Elder Scrolls, Fallout, and Starfield.
 
-[![CMake Release](https://github.com/ousnius/BodySlide-and-Outfit-Studio/actions/workflows/cmake-release.yml/badge.svg)](https://github.com/ousnius/BodySlide-and-Outfit-Studio/actions/workflows/cmake-release.yml)
+> **macOS Compatibility Fork**: This repository is a dedicated fork of the official [ousnius/BodySlide-and-Outfit-Studio](https://github.com/ousnius/BodySlide-and-Outfit-Studio) specifically tailored and maintained to run seamlessly on Apple Silicon macOS via **CrossOver / Wine** (including virtual filesystem execution through **Mod Organizer 2**).
+>
+> This fork actively tracks and integrates updates from upstream so macOS players can enjoy the latest releases and features (such as 6.1.0's MCP server, add-on/toggle sliders, 10-bit color, and sharper HDRi) with out-of-the-box Wine graphics and performance compatibility.
 
-## Documentation
-* [Wiki Overview](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki)
+[![Release](https://img.shields.io/github/v/release/kxgcayh/BodySlide-and-Outfit-Studio?label=CrossOver%20Release)](https://github.com/kxgcayh/BodySlide-and-Outfit-Studio/releases)
+
+---
+
+## macOS / CrossOver Features in this Fork
+
+* **Forward-Compatible OpenGL Core Profile**: Requests forward-compatible 3.2+ contexts required by Apple CGL / Wine `winemac.so`.
+* **BC7 CPU Fallback**: Automatically decompresses BC7 (DXGI 98/99) DDS textures to RGBA8 on the CPU when `GL_ARB_texture_compression_bptc` is unavailable, fixing black meshes when textures are resolved through MO2 on Apple Silicon.
+* **Eliminated Viewport Lag**: Disables vsync via `wglSwapIntervalEXT(0)` under Wine, dropping buffer swap wait from 11.6 ms to 0.4 ms per frame during mouse interaction.
+* **Fixed-Function Shader Cleanup**: Removes deprecated `glShadeModel` calls that violate OpenGL Core Profile on macOS.
+* **Local Clang Cross-Compilation**: Clean `clang-cl` and `lld-link` build setup directly on macOS without requiring a Windows VM. See [CROSSOVER.md](CROSSOVER.md) for full details.
+
+---
+
+## Upstream & Documentation
+* **Official Upstream Repository**: [ousnius/BodySlide-and-Outfit-Studio](https://github.com/ousnius/BodySlide-and-Outfit-Studio)
+* [Upstream Wiki Overview](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki)
 * [Guides and Documentation](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Guides-and-Documentation)
-
-## Build Instructions
+* [macOS CrossOver Guide & Build Instructions](CROSSOVER.md)
 * [Building on Windows (Visual Studio or CMake)](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Building-on-Windows-%28Visual-Studio-or-CMake%29)
 * [Building on Linux](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Building-on-Linux)
-* [Building for macOS / CrossOver (Wine)](CROSSOVER.md)
-* [Installation and Settings](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Installation-and-Settings)
-* [Installation on Linux](https://github.com/ousnius/BodySlide-and-Outfit-Studio/wiki/Installation-on-Linux)
+
+---
 
 ## Credits / Libraries
-**Created by and/or with the help of:**
-* Caliente
-* ousnius
-* jonwd7 for NIF and general help
-* degenerated1123 for help with shaders
-* NifTools team
-
+**Upstream Authors & Contributors:**
+* **[ousnius](https://github.com/ousnius)** — Lead maintainer and developer of BodySlide and Outfit Studio, creator of [nifly](https://github.com/ousnius/nifly), and author of the modern 6.x architecture.
+* **[Caliente](https://www.nexusmods.com/skyrimspecialedition/users/3330686)** — Original creator of BodySlide and Caliente's Beautiful Bodies Enhancer (CBBE).
+* **jonwd7** — NIF file structure and general architectural guidance.
+* **degenerated1123** — Shaders and rendering implementation.
+* **NifTools team** — Community reverse-engineering of the NetImmerse/Gamebryo format.
 **Relevant work:**
 * [nifly](https://github.com/ousnius/nifly): C++ NIF library for the NetImmerse File Format (NetImmerse, Gamebryo, Creation Engine).
 * [NiflySharp](https://github.com/ousnius/NiflySharp): Native C# / .NET version of nifly that uses source generation based on [nifxml](https://github.com/niftools/nifxml).
