@@ -30,6 +30,19 @@ bool FileExists(const std::string& fileName);
 #ifdef _WINDOWS
 void OpenFileStream(std::fstream& file, const std::wstring& fileName, unsigned int mode);
 bool FileExists(const std::wstring& fileName);
+
+inline bool IsRunningOnWine() {
+	static int runningOnWine = -1;
+	if (runningOnWine == -1) {
+		HMODULE hNtdll = GetModuleHandleW(L"ntdll.dll");
+		runningOnWine = (hNtdll && GetProcAddress(hNtdll, "wine_get_version") != nullptr) ? 1 : 0;
+	}
+	return runningOnWine == 1;
+}
+#else
+inline bool IsRunningOnWine() {
+	return false;
+}
 #endif
 } // namespace PlatformUtil
 

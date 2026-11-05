@@ -16,6 +16,7 @@ A tool to convert, create, and customize outfits and bodies for The Elder Scroll
 * **Forward-Compatible OpenGL Core Profile**: Requests forward-compatible 3.2+ contexts required by Apple CGL / Wine `winemac.so`.
 * **BC7 CPU Fallback**: Automatically decompresses BC7 (DXGI 98/99) DDS textures to RGBA8 on the CPU when `GL_ARB_texture_compression_bptc` is unavailable, fixing black meshes when textures are resolved through MO2 on Apple Silicon.
 * **Eliminated Viewport Lag**: Disables vsync via `wglSwapIntervalEXT(0)` under Wine, dropping buffer swap wait from 11.6 ms to 0.4 ms per frame during mouse interaction.
+* **Smooth BodySlide Slider Scrolling**: Bypasses `WS_EX_COMPOSITED` on parent panels under Wine, enabling instant bitblt scrolling instead of redrawing 1,500+ child controls on every wheel tick.
 * **Fixed-Function Shader Cleanup**: Removes deprecated `glShadeModel` calls that violate OpenGL Core Profile on macOS.
 * **Local Clang Cross-Compilation**: Clean `clang-cl` and `lld-link` build setup directly on macOS without requiring a Windows VM. See [CROSSOVER.md](CROSSOVER.md) for full details.
 

@@ -6,6 +6,7 @@ See the included LICENSE file
 #include "GLSurface.h"
 #include "GLOffscreenBuffer.h"
 #include "../utils/ConfigurationManager.h"
+#include "../utils/PlatformUtil.h"
 
 #include <wx/log.h>
 #include <wx/msgdlg.h>
@@ -158,8 +159,7 @@ void GLSurface::DisableVSyncUnderWine() {
 	// Under Wine on macOS (CrossOver) SwapBuffers blocks until the display refresh, about 12 ms of
 	// every frame, and every mouse move renders a frame on the GUI thread: the UI lags behind the
 	// mouse. Rendering only happens on demand here, so not waiting for the refresh costs nothing.
-	static const bool underWine = GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version") != nullptr;
-	if (!underWine)
+	if (!PlatformUtil::IsRunningOnWine())
 		return;
 
 	using SwapIntervalProc = BOOL(WINAPI*)(int);

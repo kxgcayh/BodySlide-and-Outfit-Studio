@@ -34,6 +34,9 @@ When running Windows versions of BodySlide and Outfit Studio under CrossOver or 
 5. **Local clang-cl Build**:
    `OutfitStudio.rc`, `BodySlide.rc` and `Resource.h` are plain ASCII (clang's resource preprocessor rejects UTF-16), and the manifests are added as CMake sources so `lld-link` embeds them (it rejects `/MANIFESTINPUT` without `/MANIFEST:EMBED`).
 
+6. **BodySlide Slider Scroll Lag (WS_EX_COMPOSITED Bypass)**:
+   In BodySlide, `leftPanel` (which hosts the slider scroll window containing over a thousand child controls) called `SetDoubleBuffered(true)`. In wxWidgets MSW, this applies the Win32 `WS_EX_COMPOSITED` extended style. Under Wine on macOS, `WS_EX_COMPOSITED` disables fast bitblt scrolling in `ScrollWindowEx` and forces Wine's display server to synchronously redraw and recomposite all 1,500+ controls on every scroll notch. This fork skips `SetDoubleBuffered(true)` on parent panels when running under Wine (`PlatformUtil::IsRunningOnWine()`), enabling instant hardware bitblt scrolling.
+
 ---
 
 ## 3. Build Instructions

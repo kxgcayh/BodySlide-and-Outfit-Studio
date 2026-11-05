@@ -6305,7 +6305,8 @@ BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
 	SetSizer(nullptr, false);
 	leftPanel->SetSizer(originalSizer);
 	leftPanel->SetBackgroundColour(GetBackgroundColour());
-	leftPanel->SetDoubleBuffered(true);
+	if (!PlatformUtil::IsRunningOnWine())
+		leftPanel->SetDoubleBuffered(true);
 
 	// Create embedded preview panel
 	previewPanel = new PreviewPanel(splitter, app);
@@ -6420,7 +6421,7 @@ BodySlideFrame::BodySlideFrame(BodySlideApp* a, const wxSize& size)
 
 	sliderScroll = (wxScrolledWindow*)FindWindowByName("SliderScrollWindow", this);
 	if (sliderScroll) {
-		sliderScroll->SetScrollRate(5, 26);
+		sliderScroll->SetScrollRate(0, 26);
 		sliderScroll->SetFocusIgnoringChildren();
 		sliderScroll->Bind(wxEVT_ENTER_WINDOW, &BodySlideFrame::OnEnterSliderWindow, this);
 
@@ -6483,8 +6484,10 @@ void BodySlideFrame::OnEnterClose(wxKeyEvent& event) {
 
 void BodySlideFrame::OnEnterSliderWindow(wxMouseEvent& event) {
 	if (this->IsActive()) {
-		if (!this->FindFocus()->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) &&
-			!this->FindFocus()->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
+		wxWindow* curFocus = this->FindFocus();
+		if (curFocus && curFocus != event.GetEventObject() &&
+			!curFocus->IsKindOf(wxClassInfo::FindClass("wxTextCtrl")) &&
+			!curFocus->IsKindOf(wxClassInfo::FindClass("wxSearchCtrl"))) {
 			wxScrolledWindow* sw = (wxScrolledWindow*)event.GetEventObject();
 			sw->SetFocusIgnoringChildren();
 		}

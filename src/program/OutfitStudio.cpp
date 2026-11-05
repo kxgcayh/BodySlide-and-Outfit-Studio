@@ -1695,7 +1695,7 @@ OutfitStudioFrame::OutfitStudioFrame(const wxPoint& pos, const wxSize& size) {
 	}
 
 	wxWindow* rightPanel = FindWindowByName("rightSplitPanel");
-	if (rightPanel)
+	if (rightPanel && !PlatformUtil::IsRunningOnWine())
 		rightPanel->SetDoubleBuffered(true);
 
 	xrc->AttachUnknownControl("mGLView", glView, this);
